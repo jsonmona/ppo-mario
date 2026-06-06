@@ -1,4 +1,5 @@
 import os
+import time
 import torch
 import numpy as np
 from typing import Optional, Tuple
@@ -70,11 +71,11 @@ class RNDModel(nn.Module):
     def __init__(self):
         super().__init__()
 
-        feature_output = 1024
+        feature_output = 3136
 
         # Prediction network
         self.predictor = nn.Sequential(
-            nn.Conv2d(1, 32, 8, stride=4, padding=0),
+            nn.Conv2d(4, 32, 8, stride=4, padding=0),
             nn.LeakyReLU(),
             nn.Conv2d(32, 64, 4, stride=2, padding=0),
             nn.LeakyReLU(),
@@ -90,7 +91,7 @@ class RNDModel(nn.Module):
 
         # Target network
         self.target = nn.Sequential(
-            nn.Conv2d(1, 32, 8, stride=4, padding=0),
+            nn.Conv2d(4, 32, 8, stride=4, padding=0),
             nn.LeakyReLU(),
             nn.Conv2d(32, 64, 4, stride=2, padding=0),
             nn.LeakyReLU(),
@@ -104,7 +105,7 @@ class RNDModel(nn.Module):
         for param in self.target.parameters():
             param.requires_grad = False
 
-        self.obs_rms = RunningMeanStd(shape=(1, 64, 64))
+        self.obs_rms = RunningMeanStd(shape=(1, 84, 84))
 
     def forward(self, obs: Tensor) -> Tuple[Tensor, Tensor]:
         target_feature = self.target(obs)
@@ -215,9 +216,9 @@ def train():
     n_envs = 512
     n_batch_size = 64
     n_actions = 7
-    n_seq = 32
+    n_seq = 16
     n_iterations = 1_000_000_000 // (n_seq * n_envs)  # 1B env steps
-    n_update_epochs = 2
+    n_update_epochs = 4
     clip_coef = 0.1
     ent_coef = 0.01
     max_grad_norm = 1.0
@@ -267,6 +268,8 @@ def train():
     video = create_videowriter(run_dir, 60 / 4, period=50, disabled=False)
 
     for iteration in range(1, n_iterations + 1):
+        time_iter_start = time.monotonic()
+
         initial_actor_state = next_actor_state.clone()
         initial_critic_state = next_critic_state.clone()
 
@@ -468,6 +471,7 @@ def train():
 
             if local_epoch == 0:
                 writer.add_scalar("env/episodic_return", np.mean(episodic_return_history), update_step)
+                writer.add_scalar("debug/time_per_iter", time.monotonic() - time_iter_start, update_step)
 
     torch.save(actor.state_dict(), os.path.join(run_dir, "final.pth"))
     writer.close()

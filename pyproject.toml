@@ -24,11 +24,12 @@ train = [
 
 [tool.ruff]
 line-length = 120
-ignore = ["F722"]
+ignore = ["E402"]
 
 [tool.pyright]
 typeCheckingMode = "basic"
 reportPrivateImportUsage = false
+exclude = ["**/node_modules", "**/__pycache__", "**/.*", "mario_rl"]
 
 [tool.uv.sources]
 torch = [

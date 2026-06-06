@@ -1,25 +1,28 @@
 import os
 import torch
 import numpy as np
-from typing import Self
+from typing import Optional, Tuple
 from torch import nn
 from torch import Tensor
-from jaxtyping import jaxtyped, Float, Float32, UInt8, Integer, Bool
-from beartype import beartype
-from einops import rearrange
 from torch.distributions.categorical import Categorical
 from dataclasses import dataclass
 from datetime import datetime
 from tensorboardX import SummaryWriter
 
-from env import make_vector_env
 from video import create_videowriter
+from model import Backbone, Actor
 
 
 def layer_init(layer, std=np.sqrt(2), bias_const=0.0):
     torch.nn.init.orthogonal_(layer.weight, std)
     torch.nn.init.constant_(layer.bias, bias_const)
     return layer
+
+
+def make_vector_env(n_envs: int):
+    import gymnasium as gym
+    from mario_rl.env import make_env
+    return gym.vector.AsyncVectorEnv([lambda: make_env() for _ in range(n_envs)])
 
 
 class RunningMeanStd:
@@ -63,115 +66,6 @@ class RewardForwardFilter:
         return self.rewems
 
 
-class Backbone(nn.Module):
-    def __init__(self):
-        super().__init__()
-
-        self.vision = nn.Sequential(
-            nn.Conv2d(1, 32, 8, stride=4, padding=0),
-            nn.ReLU(),
-            nn.Conv2d(32, 64, 4, stride=2, padding=0),
-            nn.ReLU(),
-            nn.Conv2d(64, 64, 3, stride=1, padding=0),
-            nn.ReLU(),
-            nn.Flatten(),
-        )
-
-        self.rnn = nn.GRUCell(1024, 256)
-
-        torch.nn.init.orthogonal_(self.rnn.weight_ih, 1.0)
-        torch.nn.init.orthogonal_(self.rnn.weight_hh, 1.0)
-
-    @classmethod
-    def new_state(cls, batch_size: int) -> Tensor:
-        return torch.zeros((batch_size, 256), dtype=torch.float32)
-
-    @jaxtyped(typechecker=beartype)
-    def forward_multi_step(
-        self,
-        state: Float32[Tensor, "b 256"],
-        obs: UInt8[Tensor, "seq b 1 64 64"],
-        dones: Bool[Tensor, "seq b"] | None,
-    ) -> tuple[Tensor, Tensor]:
-        n_seq = obs.shape[0]
-        n_batch = obs.shape[1]
-
-        x = rearrange(obs, "seq b c h w -> (seq b) c h w")
-        x = x.to(torch.float32) * (1 / 127.5) - 1
-        x = self.vision(x)
-        x = rearrange(x, "(seq b) c -> seq b c", seq=n_seq)
-
-        ys = []
-
-        for t in range(n_seq):
-            state = self.rnn(x[t], state)
-            ys.append(state.clone())
-
-            if dones is not None:
-                state = state.masked_fill(dones[t].unsqueeze(-1), 0)
-
-        y = torch.stack(ys)
-        assert y.shape == (n_seq, n_batch, 256)
-
-        return state, y
-
-    @jaxtyped(typechecker=beartype)
-    def forward_single_step(
-        self,
-        state: Float32[Tensor, "b 256"],
-        obs: UInt8[Tensor, "b 1 64 64"],
-        done: Bool[Tensor, " b"] | None,
-    ) -> tuple[Tensor, Tensor]:
-        obs = torch.unsqueeze(obs, 0)
-
-        if done is not None:
-            done = torch.unsqueeze(done, 0)
-
-        next_state, x = self.forward_multi_step(state, obs, done)
-
-        return next_state, x[0]
-
-
-class Actor(nn.Module):
-    def __init__(self, n_actions: int):
-        super().__init__()
-
-        self.backbone = Backbone()
-        self.action = nn.Linear(256, n_actions)
-        self.value_ext = nn.Linear(256, 1)
-        self.value_int = nn.Linear(256, 1)
-
-        torch.nn.init.orthogonal_(self.action.weight, 0.01)
-        torch.nn.init.orthogonal_(self.value_ext.weight, 1.0)
-        torch.nn.init.orthogonal_(self.value_int.weight, 1.0)
-
-    def forward_multi_step(self, state, obs, dones):
-        n_seq = obs.shape[0]
-
-        next_state, latent = self.backbone.forward_multi_step(state, obs, dones)
-
-        fold_latent = rearrange(latent, "seq b c -> (seq b) c", c=256)
-
-        fold_action = self.action(fold_latent)
-        fold_value_ext = self.value_ext(fold_latent)[..., 0]
-        fold_value_int = self.value_int(fold_latent)[..., 0]
-
-        action = rearrange(fold_action, "(seq b) c -> seq b c", seq=n_seq)
-        value_ext = torch.reshape(fold_value_ext, (n_seq, -1))
-        value_int = torch.reshape(fold_value_int, (n_seq, -1))
-
-        return next_state, action, value_ext, value_int
-
-    def forward_single_step(self, state, obs, done):
-        next_state, latent = self.backbone.forward_single_step(state, obs, done)
-
-        action_logit = self.action(latent)
-        value_ext = self.value_ext(latent)[..., 0]
-        value_int = self.value_int(latent)[..., 0]
-
-        return next_state, action_logit, value_ext, value_int
-
-
 class Critic(nn.Module):
     def __init__(self):
         super().__init__()
@@ -185,7 +79,7 @@ class Critic(nn.Module):
 
         next_state, latent = self.backbone.forward_multi_step(state, obs, dones)
 
-        fold_latent = rearrange(latent, "seq b c -> (seq b) c", c=256)
+        fold_latent = latent.reshape(-1, 256)
 
         fold_value_ext = self.value_ext(fold_latent)[..., 0]
         fold_value_int = self.value_int(fold_latent)[..., 0]
@@ -195,7 +89,7 @@ class Critic(nn.Module):
 
         return next_state, value_ext, value_int
 
-    def forward_single_step(self, state, obs, done):
+    def forward_single_step(self, state, obs, done=None):
         next_state, latent = self.backbone.forward_single_step(state, obs, done)
 
         value_ext = self.value_ext(latent)[..., 0]
@@ -244,14 +138,13 @@ class RNDModel(nn.Module):
 
         self.obs_rms = RunningMeanStd(shape=(1, 64, 64))
 
-    @jaxtyped(typechecker=beartype)
-    def forward(self, obs: Float[Tensor, "b 1 h w"]) -> tuple[Float[Tensor, "b 512"], Float[Tensor, "b 512"]]:
+    def forward(self, obs: Tensor) -> Tuple[Tensor, Tensor]:
         target_feature = self.target(obs)
         predict_feature = self.predictor(obs)
 
         return predict_feature, target_feature
 
-    def reward(self, obs: UInt8[Tensor, "b 1 h w"]):
+    def reward(self, obs: Tensor):
         # observation normalization
         obs_normalized = (obs.float() - torch.from_numpy(self.obs_rms.mean).to(obs.device)) / torch.sqrt(
             torch.from_numpy(self.obs_rms.var).to(obs.device) + 1e-8
@@ -274,7 +167,7 @@ class Rollout:
     values_int: Tensor
 
     @classmethod
-    def new(cls, n_seq: int, n_envs: int) -> Self:
+    def new(cls, n_seq: int, n_envs: int) -> "Rollout":
         s = n_seq
         b = n_envs
 
@@ -302,11 +195,10 @@ class Rollout:
         )
 
 
-@jaxtyped(typechecker=beartype)
 def calc_action(
-    logits: Float[Tensor, "*batch _"],
-    action: Integer[Tensor, "*batch"] | None = None,
-) -> tuple[Tensor, Tensor, Tensor]:
+    logits: Tensor,
+    action: Optional[Tensor] = None,
+) -> Tuple[Tensor, Tensor, Tensor]:
     probs = Categorical(logits=logits)
     if action is None:
         action = probs.sample()
@@ -314,16 +206,15 @@ def calc_action(
     return action, probs.log_prob(action), probs.entropy()
 
 
-@jaxtyped(typechecker=beartype)
 def bootstrap_gae(
-    values: Float[Tensor, "seq b"],
-    rewards: Float[Tensor, "seq b"],
-    dones: Bool[Tensor, "seq b"],
-    next_value: Float[Tensor, " b"],
-    next_done: Bool[Tensor, " b"],
+    values: Tensor,
+    rewards: Tensor,
+    dones: Tensor,
+    next_value: Tensor,
+    next_done: Tensor,
     gamma: float,
     gae_lambda: float,
-) -> tuple[torch.Tensor, torch.Tensor]:
+) -> Tuple[torch.Tensor, torch.Tensor]:
     n_seq = rewards.shape[0]
     advantages = torch.zeros_like(rewards)
     lastgaelam = 0
@@ -406,7 +297,6 @@ def train():
     reward_filter = RewardForwardFilter(0.99)
 
     video = create_videowriter(run_dir, 60 / 4, period=50, disabled=False)
-    # timing_cnt = 0
 
     for iteration in range(1, n_iterations + 1):
         initial_actor_state = next_actor_state.clone()
@@ -560,7 +450,7 @@ def train():
 
                 # Optimize RND
                 if local_epoch == 0:
-                    mb_flatobs = rearrange(mb_obs, "s b c h w -> (s b) c h w")
+                    mb_flatobs = mb_obs.reshape(-1, *mb_obs.shape[2:])
 
                     # 25%
                     rnd_train_inds = torch.randperm(mb_flatobs.shape[0], device=device)
@@ -611,12 +501,9 @@ def train():
             if local_epoch == 0:
                 writer.add_scalar("env/episodic_return", np.mean(episodic_return_history), update_step)
 
-        # timing_cnt += 1
-        # if timing_cnt < 4:
-        #     timing = time.monotonic()
-        # else:
-        #     print(time.monotonic() - timing, "seconds per batch")
-        #     exit()
-
     torch.save(actor.state_dict(), os.path.join(run_dir, "final.pth"))
     writer.close()
+
+
+if __name__ == "__main__":
+    train()

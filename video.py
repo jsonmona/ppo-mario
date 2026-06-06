@@ -5,7 +5,6 @@ import av
 from abc import ABC, abstractmethod
 from typing import Callable
 from fractions import Fraction
-from beartype import beartype
 
 
 OPTIONS = {
@@ -28,7 +27,6 @@ class DummyVideoWriter(VideoWriter):
         pass
 
 
-@beartype
 class PeriodicVideoWriter(VideoWriter):
     def __init__(self, run_dir: str, rate: float, period: int = 100):
         self.run_dir = run_dir
@@ -87,7 +85,6 @@ class PeriodicVideoWriter(VideoWriter):
             self.container = None
 
 
-@beartype
 def create_videowriter(run_dir: str, rate: float, period: int = 100, disabled: bool = False) -> VideoWriter:
     if disabled:
         return DummyVideoWriter()

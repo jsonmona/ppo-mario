@@ -1,0 +1,622 @@
+import os
+import torch
+import numpy as np
+from typing import Self
+from torch import nn
+from torch import Tensor
+from jaxtyping import jaxtyped, Float, Float32, UInt8, Integer, Bool
+from beartype import beartype
+from einops import rearrange
+from torch.distributions.categorical import Categorical
+from dataclasses import dataclass
+from datetime import datetime
+from tensorboardX import SummaryWriter
+
+from env import make_vector_env
+from video import create_videowriter
+
+
+def layer_init(layer, std=np.sqrt(2), bias_const=0.0):
+    torch.nn.init.orthogonal_(layer.weight, std)
+    torch.nn.init.constant_(layer.bias, bias_const)
+    return layer
+
+
+class RunningMeanStd:
+    # https://en.wikipedia.org/wiki/Algorithms_for_calculating_variance#Parallel_algorithm
+    def __init__(self, epsilon: float = 1e-4, shape: tuple[int, ...] = ()):
+        self.mean = np.zeros(shape, "float64")
+        self.var = np.ones(shape, "float64")
+        self.count = epsilon
+
+    def update(self, x: np.ndarray):
+        batch_mean = np.mean(x, axis=0)
+        batch_var = np.var(x, axis=0)
+        batch_count = x.shape[0]
+        self.update_from_moments(batch_mean, batch_var, batch_count)
+
+    def update_from_moments(self, batch_mean, batch_var, batch_count):
+        delta = batch_mean - self.mean
+        tot_count = self.count + batch_count
+
+        new_mean = self.mean + delta * batch_count / tot_count
+        m_a = self.var * self.count
+        m_b = batch_var * batch_count
+        m_2 = m_a + m_b + np.square(delta) * self.count * batch_count / tot_count
+        new_var = m_2 / tot_count
+
+        self.mean = new_mean
+        self.var = new_var
+        self.count = tot_count
+
+
+class RewardForwardFilter:
+    def __init__(self, gamma: float):
+        self.rewems = None
+        self.gamma = gamma
+
+    def update(self, rews: np.ndarray):
+        if self.rewems is None:
+            self.rewems = rews
+        else:
+            self.rewems = self.rewems * self.gamma + rews
+        return self.rewems
+
+
+class Backbone(nn.Module):
+    def __init__(self):
+        super().__init__()
+
+        self.vision = nn.Sequential(
+            nn.Conv2d(1, 32, 8, stride=4, padding=0),
+            nn.ReLU(),
+            nn.Conv2d(32, 64, 4, stride=2, padding=0),
+            nn.ReLU(),
+            nn.Conv2d(64, 64, 3, stride=1, padding=0),
+            nn.ReLU(),
+            nn.Flatten(),
+        )
+
+        self.rnn = nn.GRUCell(1024, 256)
+
+        torch.nn.init.orthogonal_(self.rnn.weight_ih, 1.0)
+        torch.nn.init.orthogonal_(self.rnn.weight_hh, 1.0)
+
+    @classmethod
+    def new_state(cls, batch_size: int) -> Tensor:
+        return torch.zeros((batch_size, 256), dtype=torch.float32)
+
+    @jaxtyped(typechecker=beartype)
+    def forward_multi_step(
+        self,
+        state: Float32[Tensor, "b 256"],
+        obs: UInt8[Tensor, "seq b 1 64 64"],
+        dones: Bool[Tensor, "seq b"] | None,
+    ) -> tuple[Tensor, Tensor]:
+        n_seq = obs.shape[0]
+        n_batch = obs.shape[1]
+
+        x = rearrange(obs, "seq b c h w -> (seq b) c h w")
+        x = x.to(torch.float32) * (1 / 127.5) - 1
+        x = self.vision(x)
+        x = rearrange(x, "(seq b) c -> seq b c", seq=n_seq)
+
+        ys = []
+
+        for t in range(n_seq):
+            state = self.rnn(x[t], state)
+            ys.append(state.clone())
+
+            if dones is not None:
+                state = state.masked_fill(dones[t].unsqueeze(-1), 0)
+
+        y = torch.stack(ys)
+        assert y.shape == (n_seq, n_batch, 256)
+
+        return state, y
+
+    @jaxtyped(typechecker=beartype)
+    def forward_single_step(
+        self,
+        state: Float32[Tensor, "b 256"],
+        obs: UInt8[Tensor, "b 1 64 64"],
+        done: Bool[Tensor, " b"] | None,
+    ) -> tuple[Tensor, Tensor]:
+        obs = torch.unsqueeze(obs, 0)
+
+        if done is not None:
+            done = torch.unsqueeze(done, 0)
+
+        next_state, x = self.forward_multi_step(state, obs, done)
+
+        return next_state, x[0]
+
+
+class Actor(nn.Module):
+    def __init__(self, n_actions: int):
+        super().__init__()
+
+        self.backbone = Backbone()
+        self.action = nn.Linear(256, n_actions)
+        self.value_ext = nn.Linear(256, 1)
+        self.value_int = nn.Linear(256, 1)
+
+        torch.nn.init.orthogonal_(self.action.weight, 0.01)
+        torch.nn.init.orthogonal_(self.value_ext.weight, 1.0)
+        torch.nn.init.orthogonal_(self.value_int.weight, 1.0)
+
+    def forward_multi_step(self, state, obs, dones):
+        n_seq = obs.shape[0]
+
+        next_state, latent = self.backbone.forward_multi_step(state, obs, dones)
+
+        fold_latent = rearrange(latent, "seq b c -> (seq b) c", c=256)
+
+        fold_action = self.action(fold_latent)
+        fold_value_ext = self.value_ext(fold_latent)[..., 0]
+        fold_value_int = self.value_int(fold_latent)[..., 0]
+
+        action = rearrange(fold_action, "(seq b) c -> seq b c", seq=n_seq)
+        value_ext = torch.reshape(fold_value_ext, (n_seq, -1))
+        value_int = torch.reshape(fold_value_int, (n_seq, -1))
+
+        return next_state, action, value_ext, value_int
+
+    def forward_single_step(self, state, obs, done):
+        next_state, latent = self.backbone.forward_single_step(state, obs, done)
+
+        action_logit = self.action(latent)
+        value_ext = self.value_ext(latent)[..., 0]
+        value_int = self.value_int(latent)[..., 0]
+
+        return next_state, action_logit, value_ext, value_int
+
+
+class Critic(nn.Module):
+    def __init__(self):
+        super().__init__()
+
+        self.backbone = Backbone()
+        self.value_ext = nn.Linear(256, 1)
+        self.value_int = nn.Linear(256, 1)
+
+    def forward_multi_step(self, state, obs, dones):
+        n_seq = obs.shape[0]
+
+        next_state, latent = self.backbone.forward_multi_step(state, obs, dones)
+
+        fold_latent = rearrange(latent, "seq b c -> (seq b) c", c=256)
+
+        fold_value_ext = self.value_ext(fold_latent)[..., 0]
+        fold_value_int = self.value_int(fold_latent)[..., 0]
+
+        value_ext = torch.reshape(fold_value_ext, (n_seq, -1))
+        value_int = torch.reshape(fold_value_int, (n_seq, -1))
+
+        return next_state, value_ext, value_int
+
+    def forward_single_step(self, state, obs, done):
+        next_state, latent = self.backbone.forward_single_step(state, obs, done)
+
+        value_ext = self.value_ext(latent)[..., 0]
+        value_int = self.value_int(latent)[..., 0]
+
+        return next_state, value_ext, value_int
+
+
+class RNDModel(nn.Module):
+    def __init__(self):
+        super().__init__()
+
+        feature_output = 1024
+
+        # Prediction network
+        self.predictor = nn.Sequential(
+            nn.Conv2d(1, 32, 8, stride=4, padding=0),
+            nn.LeakyReLU(),
+            nn.Conv2d(32, 64, 4, stride=2, padding=0),
+            nn.LeakyReLU(),
+            nn.Conv2d(64, 64, 3, stride=1, padding=0),
+            nn.LeakyReLU(),
+            nn.Flatten(),
+            layer_init(nn.Linear(feature_output, 512)),
+            nn.ReLU(),
+            layer_init(nn.Linear(512, 512)),
+            nn.ReLU(),
+            layer_init(nn.Linear(512, 512)),
+        )
+
+        # Target network
+        self.target = nn.Sequential(
+            nn.Conv2d(1, 32, 8, stride=4, padding=0),
+            nn.LeakyReLU(),
+            nn.Conv2d(32, 64, 4, stride=2, padding=0),
+            nn.LeakyReLU(),
+            nn.Conv2d(64, 64, 3, stride=1, padding=0),
+            nn.LeakyReLU(),
+            nn.Flatten(),
+            layer_init(nn.Linear(feature_output, 512)),
+        )
+
+        # target network is not trainable
+        for param in self.target.parameters():
+            param.requires_grad = False
+
+        self.obs_rms = RunningMeanStd(shape=(1, 64, 64))
+
+    @jaxtyped(typechecker=beartype)
+    def forward(self, obs: Float[Tensor, "b 1 h w"]) -> tuple[Float[Tensor, "b 512"], Float[Tensor, "b 512"]]:
+        target_feature = self.target(obs)
+        predict_feature = self.predictor(obs)
+
+        return predict_feature, target_feature
+
+    def reward(self, obs: UInt8[Tensor, "b 1 h w"]):
+        # observation normalization
+        obs_normalized = (obs.float() - torch.from_numpy(self.obs_rms.mean).to(obs.device)) / torch.sqrt(
+            torch.from_numpy(self.obs_rms.var).to(obs.device) + 1e-8
+        )
+        obs_normalized = torch.clamp(obs_normalized, -5, 5).float()
+
+        pred, target = self.forward(obs_normalized)
+        return torch.square(pred - target.detach()).mean(dim=1)
+
+
+@dataclass
+class Rollout:
+    obs: Tensor
+    actions: Tensor
+    logprobs: Tensor
+    rewards_ext: Tensor
+    rewards_int: Tensor
+    dones: Tensor
+    values_ext: Tensor
+    values_int: Tensor
+
+    @classmethod
+    def new(cls, n_seq: int, n_envs: int) -> Self:
+        s = n_seq
+        b = n_envs
+
+        return cls(
+            obs=torch.zeros((s, b, 1, 64, 64), dtype=torch.uint8),
+            actions=torch.zeros((s, b), dtype=torch.int32),
+            logprobs=torch.zeros((s, b), dtype=torch.float32),
+            rewards_ext=torch.zeros((s, b), dtype=torch.float32),
+            rewards_int=torch.zeros((s, b), dtype=torch.float32),
+            dones=torch.zeros((s, b), dtype=torch.bool),
+            values_ext=torch.zeros((s, b), dtype=torch.float32),
+            values_int=torch.zeros((s, b), dtype=torch.float32),
+        )
+
+    def to(self, *args, **kwargs):
+        return Rollout(
+            obs=self.obs.to(*args, **kwargs),
+            actions=self.actions.to(*args, **kwargs),
+            logprobs=self.logprobs.to(*args, **kwargs),
+            rewards_ext=self.rewards_ext.to(*args, **kwargs),
+            rewards_int=self.rewards_int.to(*args, **kwargs),
+            dones=self.dones.to(*args, **kwargs),
+            values_ext=self.values_ext.to(*args, **kwargs),
+            values_int=self.values_int.to(*args, **kwargs),
+        )
+
+
+@jaxtyped(typechecker=beartype)
+def calc_action(
+    logits: Float[Tensor, "*batch _"],
+    action: Integer[Tensor, "*batch"] | None = None,
+) -> tuple[Tensor, Tensor, Tensor]:
+    probs = Categorical(logits=logits)
+    if action is None:
+        action = probs.sample()
+
+    return action, probs.log_prob(action), probs.entropy()
+
+
+@jaxtyped(typechecker=beartype)
+def bootstrap_gae(
+    values: Float[Tensor, "seq b"],
+    rewards: Float[Tensor, "seq b"],
+    dones: Bool[Tensor, "seq b"],
+    next_value: Float[Tensor, " b"],
+    next_done: Bool[Tensor, " b"],
+    gamma: float,
+    gae_lambda: float,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    n_seq = rewards.shape[0]
+    advantages = torch.zeros_like(rewards)
+    lastgaelam = 0
+
+    nextvalues = next_value
+
+    for t in range(n_seq - 1, -1, -1):
+        nextnonterminal = torch.logical_not(dones[t]).float()
+
+        delta = rewards[t] + gamma * nextvalues * nextnonterminal - values[t]
+        advantages[t] = lastgaelam = delta + gamma * gae_lambda * nextnonterminal * lastgaelam
+
+        nextvalues = values[t]
+
+    returns = advantages + values
+
+    return advantages, returns
+
+
+def train():
+    torch.set_float32_matmul_precision("medium")
+    torch.manual_seed(42)
+
+    device = torch.device("cuda") if torch.cuda.is_available() else torch.device("cpu")
+    rng = np.random.Generator(np.random.PCG64(12345678))
+
+    run_dir = "./runs/" + datetime.now().strftime("%Y%m%d_%H%M%S")
+    writer = SummaryWriter(run_dir, flush_secs=30)
+
+    n_envs = 512
+    n_batch_size = 64
+    n_actions = 18
+    n_seq = 32
+    n_iterations = 1_000_000_000 // (n_seq * n_envs)  # 1B env steps
+    n_update_epochs = 2
+    clip_coef = 0.1
+    ent_coef = 0.01
+    max_grad_norm = 1.0
+    ext_coeff = 1.0
+    rnd_coeff = 2.0
+
+    assert n_envs % n_batch_size == 0
+
+    env = make_vector_env(n_envs)
+
+    next_obs, _ = env.reset()
+    next_obs = torch.tensor(next_obs).to(device)
+    next_done = torch.zeros((n_envs), dtype=torch.bool, device=device)
+    next_actor_state = Backbone.new_state(n_envs).to(device)
+    next_critic_state = Backbone.new_state(n_envs).to(device)
+
+    episodic_returns = np.zeros(n_envs, dtype=np.float32)
+    episodic_return_history = np.zeros(256, dtype=np.float32)
+    episodic_return_history_pos = 0
+
+    rollout = Rollout.new(n_seq, n_envs).to(device)
+
+    actor = Actor(n_actions).to(device)
+    critic = Critic().to(device)
+    rnd = RNDModel().to(device)
+
+    actor_opt = torch.optim.AdamW(actor.parameters(), lr=0.0002, eps=1e-8, weight_decay=1e-4)
+    critic_opt = torch.optim.AdamW(critic.parameters(), lr=0.0002, eps=1e-8, weight_decay=1e-4)
+    rnd_opt = torch.optim.AdamW(rnd.predictor.parameters(), lr=0.0002, eps=1e-8, weight_decay=1e-4)
+
+    # Observation warmup
+    print("Observation warmup...")
+    warmup_obs = []
+    temp_obs, _ = env.reset()
+    for _ in range(50):
+        action = np.random.randint(0, n_actions, size=(n_envs,))
+        temp_obs, _, terminations, truncations, _ = env.step(action)
+        warmup_obs.append(temp_obs[:, 0:1])  # (n_envs, 1, 64, 64)
+        if np.any(np.logical_or(terminations, truncations)):
+            temp_obs, _ = env.reset()
+    rnd.obs_rms.update(np.concatenate(warmup_obs, axis=0))
+    print("Warmup done.")
+
+    reward_rms = RunningMeanStd()
+    reward_filter = RewardForwardFilter(0.99)
+
+    video = create_videowriter(run_dir, 60 / 4, period=50, disabled=False)
+    # timing_cnt = 0
+
+    for iteration in range(1, n_iterations + 1):
+        initial_actor_state = next_actor_state.clone()
+        initial_critic_state = next_critic_state.clone()
+
+        with torch.no_grad():
+            for step in range(n_seq):
+                rollout.obs[step] = next_obs
+                rollout.dones[step] = next_done
+
+                start_new = video.step(
+                    lambda: next_obs[0].cpu().numpy(),
+                    bool(next_done[0].item()),
+                    iteration * n_seq + step,
+                )
+
+                if start_new is not None:
+                    torch.save(actor.state_dict(), os.path.splitext(start_new)[0] + ".pth")
+
+                next_actor_state, action_logit, _, _ = actor.forward_single_step(next_actor_state, next_obs, next_done)
+                next_critic_state, cv_ext, cv_int = critic.forward_single_step(next_critic_state, next_obs, next_done)
+
+                action, logprob, _ = calc_action(logits=action_logit)
+                rollout.values_ext[step] = cv_ext
+                rollout.values_int[step] = cv_int
+                rollout.actions[step] = action
+                rollout.logprobs[step] = logprob
+
+                next_obs, ext_reward, terminations, truncations, _ = env.step(action.cpu().numpy())
+                next_done = np.logical_or(terminations, truncations)
+                episodic_returns += ext_reward
+
+                if np.any(next_done):
+                    for x in episodic_returns[next_done]:
+                        episodic_return_history[episodic_return_history_pos] = x
+                        episodic_return_history_pos = (episodic_return_history_pos + 1) % len(episodic_return_history)
+                    episodic_returns[next_done] = 0
+
+                next_obs = torch.tensor(next_obs).to(device)
+                next_done = torch.tensor(next_done).to(device)
+
+                rnd_reward = rnd.reward(next_obs).cpu().numpy()
+
+                rollout.rewards_ext[step] = torch.tensor(ext_reward).to(device)
+                rollout.rewards_int[step] = torch.tensor(rnd_reward).to(device)
+
+        # Intrinsic reward normalization
+        intrinsic_rewards = rollout.rewards_int.cpu().numpy()
+        intrinsic_returns = np.zeros_like(intrinsic_rewards)
+        for t in range(n_seq):
+            intrinsic_returns[t] = reward_filter.update(intrinsic_rewards[t])
+        reward_rms.update(intrinsic_returns.reshape(-1))
+        rollout.rewards_int /= torch.sqrt(torch.tensor(reward_rms.var, device=device) + 1e-8)
+        rollout.rewards_int.clamp_(max=1.0)
+
+        # Update obs_rms
+        rnd.obs_rms.update(rollout.obs.cpu().numpy().reshape(-1, 1, 64, 64))
+
+        with torch.no_grad():
+            _, next_v_ext, next_v_int = critic.forward_single_step(next_critic_state, next_obs, next_done)
+
+        adv_ext, ret_ext = bootstrap_gae(
+            rollout.values_ext,
+            rollout.rewards_ext,
+            rollout.dones,
+            next_v_ext,
+            next_done,
+            0.999,
+            0.95,
+        )
+
+        adv_int, ret_int = bootstrap_gae(
+            rollout.values_int,
+            rollout.rewards_int,
+            torch.zeros_like(rollout.dones),
+            next_v_int,
+            torch.zeros_like(next_done),
+            0.99,
+            0.95,
+        )
+
+        advantages = adv_ext * ext_coeff + adv_int * rnd_coeff
+        adv_std, adv_mean = torch.std_mean(advantages)
+        advantages = (advantages - adv_mean) / (adv_std + 1e-8)
+
+        for local_epoch in range(n_update_epochs):
+            log_approx_kl = 0.0
+            log_clipfracs = 0.0
+            log_v_loss = 0.0
+            log_pg_loss = 0.0
+            log_entropy_loss = 0.0
+            log_distill_loss = 0.0
+            log_rnd_loss = 0.0
+
+            idx_order = rng.choice(n_envs, size=n_envs, replace=False)
+            idx_order = np.reshape(idx_order, (n_envs // n_batch_size, n_batch_size))
+            idx_order.sort(axis=-1)
+
+            for mb_idx in idx_order:
+                mb_obs = rollout.obs[:, mb_idx]
+                mb_logprobs = rollout.logprobs[:, mb_idx]
+                mb_actions = rollout.actions[:, mb_idx]
+                mb_dones = rollout.dones[:, mb_idx]
+                mb_advantages = advantages[:, mb_idx]
+                mb_ret_ext = ret_ext[:, mb_idx]
+                mb_ret_int = ret_int[:, mb_idx]
+                mb_v_ext = rollout.values_ext[:, mb_idx]
+                mb_v_int = rollout.values_int[:, mb_idx]
+
+                mb_actor_state = initial_actor_state[mb_idx]
+                mb_critic_state = initial_critic_state[mb_idx]
+
+                # Optimize critic
+                mb_critic_state, newv_ext, newv_int = critic.forward_multi_step(mb_critic_state, mb_obs, mb_dones)
+
+                v_loss_ext = 0.5 * torch.square(newv_ext - mb_ret_ext).mean()
+                v_loss_int = 0.5 * torch.square(newv_int - mb_ret_int).mean()
+                v_loss = v_loss_ext + v_loss_int
+
+                critic_opt.zero_grad()
+                v_loss.backward()
+                nn.utils.clip_grad_norm_(critic.parameters(), max_grad_norm)
+                critic_opt.step()
+
+                # Optimize policy
+                mb_actor_state, newlogit, v_ext_from_actor, v_int_from_actor = actor.forward_multi_step(
+                    mb_actor_state, mb_obs, mb_dones
+                )
+                _, newlogprob, newentropy = calc_action(newlogit, mb_actions)
+                logratio = newlogprob - mb_logprobs
+                ratio = torch.exp(logratio)
+
+                pg_loss1 = -mb_advantages * ratio
+                pg_loss2 = -mb_advantages * torch.clamp(ratio, 1 - clip_coef, 1 + clip_coef)
+
+                mb_valid_mask = torch.logical_not(mb_dones)
+                mb_valid_count = torch.clamp(mb_valid_mask.sum(), min=1.0)
+
+                pg_loss = (torch.max(pg_loss1, pg_loss2) * mb_valid_mask).sum() / mb_valid_count
+                distill_loss_ext = 0.5 * torch.square(mb_v_ext - v_ext_from_actor).mean()
+                distill_loss_int = 0.5 * torch.square(mb_v_int - v_int_from_actor).mean()
+                distill_loss = distill_loss_ext + distill_loss_int
+                entropy_loss = newentropy.mean()
+
+                actor_loss = pg_loss + distill_loss * 0.5 - entropy_loss * ent_coef
+
+                actor_opt.zero_grad()
+                actor_loss.backward()
+                nn.utils.clip_grad_norm_(actor.parameters(), max_grad_norm)
+                actor_opt.step()
+
+                # Optimize RND
+                if local_epoch == 0:
+                    mb_flatobs = rearrange(mb_obs, "s b c h w -> (s b) c h w")
+
+                    # 25%
+                    rnd_train_inds = torch.randperm(mb_flatobs.shape[0], device=device)
+                    rnd_train_inds = rnd_train_inds[: len(rnd_train_inds) // 4]
+                    mb_flatobs_subset = mb_flatobs[rnd_train_inds]
+
+                    obs_normalized = (
+                        mb_flatobs_subset.float() - torch.from_numpy(rnd.obs_rms.mean).to(device)
+                    ) / torch.sqrt(torch.from_numpy(rnd.obs_rms.var).to(device) + 1e-8)
+                    obs_normalized = torch.clamp(obs_normalized, -5, 5).float()
+
+                    pred, target = rnd(obs_normalized)
+                    rnd_loss = torch.square(pred - target.detach()).mean()
+
+                    rnd_opt.zero_grad()
+                    rnd_loss.backward()
+                    nn.utils.clip_grad_norm_(rnd.parameters(), max_grad_norm)
+                    rnd_opt.step()
+
+                # Put back the RNN state and value
+                if local_epoch == n_update_epochs - 1:
+                    next_actor_state[mb_idx] = mb_actor_state.detach()
+                next_critic_state[mb_idx] = mb_critic_state.detach()
+                rollout.values_ext[:, mb_idx] = newv_ext.detach()
+                rollout.values_int[:, mb_idx] = newv_int.detach()
+
+                # Logging info
+                with torch.no_grad():
+                    divisor = len(idx_order)
+
+                    log_approx_kl += ((ratio - 1) - logratio).mean().item() / divisor
+                    log_clipfracs += ((ratio - 1.0).abs() > clip_coef).float().mean().item() / divisor
+                    log_v_loss += v_loss.item() / divisor
+                    log_pg_loss += pg_loss.item() / divisor
+                    log_entropy_loss += entropy_loss.item() / divisor
+                    log_distill_loss += distill_loss.item() / divisor
+                    log_rnd_loss += rnd_loss.item() / divisor
+
+            update_step = iteration * n_update_epochs + local_epoch
+            writer.add_scalar("loss/approx_kl", log_approx_kl, update_step)
+            writer.add_scalar("loss/clipfrac", log_clipfracs, update_step)
+            writer.add_scalar("loss/value_loss", log_v_loss, update_step)
+            writer.add_scalar("loss/policy_loss", log_pg_loss, update_step)
+            writer.add_scalar("loss/entropy_loss", log_entropy_loss, update_step)
+            writer.add_scalar("loss/distill_loss", log_distill_loss, update_step)
+            writer.add_scalar("loss/rnd_loss", log_rnd_loss, update_step)
+
+            if local_epoch == 0:
+                writer.add_scalar("env/episodic_return", np.mean(episodic_return_history), update_step)
+
+        # timing_cnt += 1
+        # if timing_cnt < 4:
+        #     timing = time.monotonic()
+        # else:
+        #     print(time.monotonic() - timing, "seconds per batch")
+        #     exit()
+
+    torch.save(actor.state_dict(), os.path.join(run_dir, "final.pth"))
+    writer.close()

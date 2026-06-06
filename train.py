@@ -6,6 +6,7 @@ from typing import Optional, Tuple
 from torch import nn
 from torch import Tensor
 from torch.distributions.categorical import Categorical
+from rich.progress import track
 from dataclasses import dataclass
 from datetime import datetime
 from tensorboardX import SummaryWriter
@@ -267,7 +268,7 @@ def train():
 
     video = create_videowriter(run_dir, 60 / 4, period=50, disabled=False)
 
-    for iteration in range(1, n_iterations + 1):
+    for iteration in track(range(1, n_iterations + 1), description="Training..."):
         time_iter_start = time.monotonic()
 
         initial_actor_state = next_actor_state.clone()

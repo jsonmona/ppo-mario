@@ -9,7 +9,7 @@ class Backbone(nn.Module):
         super().__init__()
 
         self.vision = nn.Sequential(
-            nn.Conv2d(1, 32, 8, stride=4, padding=0),
+            nn.Conv2d(4, 32, 8, stride=4, padding=0),
             nn.ReLU(),
             nn.Conv2d(32, 64, 4, stride=2, padding=0),
             nn.ReLU(),
@@ -18,7 +18,7 @@ class Backbone(nn.Module):
             nn.Flatten(),
         )
 
-        self.rnn = nn.GRUCell(1024, 256)
+        self.rnn = nn.GRUCell(3136, 256)
 
         torch.nn.init.orthogonal_(self.rnn.weight_ih, 1.0)
         torch.nn.init.orthogonal_(self.rnn.weight_hh, 1.0)
@@ -109,3 +109,35 @@ class Actor(nn.Module):
         value_int = self.value_int(latent)[..., 0]
 
         return next_state, action_logit, value_ext, value_int
+
+
+class Critic(nn.Module):
+    def __init__(self):
+        super().__init__()
+
+        self.backbone = Backbone()
+        self.value_ext = nn.Linear(256, 1)
+        self.value_int = nn.Linear(256, 1)
+
+    def forward_multi_step(self, state, obs, dones):
+        n_seq = obs.shape[0]
+
+        next_state, latent = self.backbone.forward_multi_step(state, obs, dones)
+
+        fold_latent = latent.reshape(-1, 256)
+
+        fold_value_ext = self.value_ext(fold_latent)[..., 0]
+        fold_value_int = self.value_int(fold_latent)[..., 0]
+
+        value_ext = torch.reshape(fold_value_ext, (n_seq, -1))
+        value_int = torch.reshape(fold_value_int, (n_seq, -1))
+
+        return next_state, value_ext, value_int
+
+    def forward_single_step(self, state, obs, done=None):
+        next_state, latent = self.backbone.forward_single_step(state, obs, done)
+
+        value_ext = self.value_ext(latent)[..., 0]
+        value_int = self.value_int(latent)[..., 0]
+
+        return next_state, value_ext, value_int

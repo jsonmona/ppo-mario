@@ -10,7 +10,7 @@ from datetime import datetime
 from tensorboardX import SummaryWriter
 
 from video import create_videowriter
-from model import Backbone, Actor
+from model import Backbone, Actor, Critic
 
 
 def layer_init(layer, std=np.sqrt(2), bias_const=0.0):
@@ -64,38 +64,6 @@ class RewardForwardFilter:
         else:
             self.rewems = self.rewems * self.gamma + rews
         return self.rewems
-
-
-class Critic(nn.Module):
-    def __init__(self):
-        super().__init__()
-
-        self.backbone = Backbone()
-        self.value_ext = nn.Linear(256, 1)
-        self.value_int = nn.Linear(256, 1)
-
-    def forward_multi_step(self, state, obs, dones):
-        n_seq = obs.shape[0]
-
-        next_state, latent = self.backbone.forward_multi_step(state, obs, dones)
-
-        fold_latent = latent.reshape(-1, 256)
-
-        fold_value_ext = self.value_ext(fold_latent)[..., 0]
-        fold_value_int = self.value_int(fold_latent)[..., 0]
-
-        value_ext = torch.reshape(fold_value_ext, (n_seq, -1))
-        value_int = torch.reshape(fold_value_int, (n_seq, -1))
-
-        return next_state, value_ext, value_int
-
-    def forward_single_step(self, state, obs, done=None):
-        next_state, latent = self.backbone.forward_single_step(state, obs, done)
-
-        value_ext = self.value_ext(latent)[..., 0]
-        value_int = self.value_int(latent)[..., 0]
-
-        return next_state, value_ext, value_int
 
 
 class RNDModel(nn.Module):
@@ -172,7 +140,7 @@ class Rollout:
         b = n_envs
 
         return cls(
-            obs=torch.zeros((s, b, 1, 64, 64), dtype=torch.uint8),
+            obs=torch.zeros((s, b, 4, 84, 84), dtype=torch.uint8),
             actions=torch.zeros((s, b), dtype=torch.int32),
             logprobs=torch.zeros((s, b), dtype=torch.float32),
             rewards_ext=torch.zeros((s, b), dtype=torch.float32),
@@ -246,7 +214,7 @@ def train():
 
     n_envs = 512
     n_batch_size = 64
-    n_actions = 18
+    n_actions = 7
     n_seq = 32
     n_iterations = 1_000_000_000 // (n_seq * n_envs)  # 1B env steps
     n_update_epochs = 2
@@ -287,7 +255,7 @@ def train():
     for _ in range(50):
         action = np.random.randint(0, n_actions, size=(n_envs,))
         temp_obs, _, terminations, truncations, _ = env.step(action)
-        warmup_obs.append(temp_obs[:, 0:1])  # (n_envs, 1, 64, 64)
+        warmup_obs.append(temp_obs)
         if np.any(np.logical_or(terminations, truncations)):
             temp_obs, _ = env.reset()
     rnd.obs_rms.update(np.concatenate(warmup_obs, axis=0))
@@ -308,7 +276,7 @@ def train():
                 rollout.dones[step] = next_done
 
                 start_new = video.step(
-                    lambda: next_obs[0].cpu().numpy(),
+                    lambda: next_obs[0, -1].cpu().numpy(),
                     bool(next_done[0].item()),
                     iteration * n_seq + step,
                 )
@@ -353,7 +321,7 @@ def train():
         rollout.rewards_int.clamp_(max=1.0)
 
         # Update obs_rms
-        rnd.obs_rms.update(rollout.obs.cpu().numpy().reshape(-1, 1, 64, 64))
+        rnd.obs_rms.update(rollout.obs.cpu().numpy().reshape(-1, 4, 84, 84))
 
         with torch.no_grad():
             _, next_v_ext, next_v_int = critic.forward_single_step(next_critic_state, next_obs, next_done)

@@ -217,7 +217,7 @@ def train():
     n_envs = 64
     n_batch_size = 64
     n_actions = 7
-    n_seq = 16
+    n_seq = 256
     n_iterations = 1_000_000_000 // (n_seq * n_envs)  # 1B env steps
     n_update_epochs = 4
     clip_coef = 0.1

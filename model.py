@@ -4,6 +4,15 @@ from torch import Tensor
 from typing import Optional, Tuple
 
 
+def symlog(x: Tensor):
+    return torch.sign(x) * torch.log1p(torch.abs(x))
+
+
+def symexp(x: Tensor):
+    x = torch.clip(x, -20, 20)
+    return torch.sign(x) * torch.expm1(torch.abs(x))
+
+
 class Backbone(nn.Module):
     def __init__(self):
         super().__init__()
@@ -92,7 +101,7 @@ class Actor(nn.Module):
         fold_latent = latent.reshape(-1, 256)
 
         fold_action = self.action(fold_latent)
-        fold_value_ext = self.value_ext(fold_latent)[..., 0]
+        fold_value_ext = symexp(self.value_ext(fold_latent)[..., 0])
         fold_value_int = self.value_int(fold_latent)[..., 0]
 
         action = fold_action.reshape(n_seq, -1, fold_action.shape[-1])
@@ -105,7 +114,7 @@ class Actor(nn.Module):
         next_state, latent = self.backbone.forward_single_step(state, obs, done)
 
         action_logit = self.action(latent)
-        value_ext = self.value_ext(latent)[..., 0]
+        value_ext = symexp(self.value_ext(latent)[..., 0])
         value_int = self.value_int(latent)[..., 0]
 
         return next_state, action_logit, value_ext, value_int
@@ -126,7 +135,7 @@ class Critic(nn.Module):
 
         fold_latent = latent.reshape(-1, 256)
 
-        fold_value_ext = self.value_ext(fold_latent)[..., 0]
+        fold_value_ext = symexp(self.value_ext(fold_latent)[..., 0])
         fold_value_int = self.value_int(fold_latent)[..., 0]
 
         value_ext = torch.reshape(fold_value_ext, (n_seq, -1))
@@ -137,7 +146,7 @@ class Critic(nn.Module):
     def forward_single_step(self, state, obs, done=None):
         next_state, latent = self.backbone.forward_single_step(state, obs, done)
 
-        value_ext = self.value_ext(latent)[..., 0]
+        value_ext = symexp(self.value_ext(latent)[..., 0])
         value_int = self.value_int(latent)[..., 0]
 
         return next_state, value_ext, value_int

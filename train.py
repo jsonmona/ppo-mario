@@ -12,7 +12,7 @@ from datetime import datetime
 from tensorboardX import SummaryWriter
 
 from video import create_videowriter
-from model import Backbone, Actor, Critic
+from model import Backbone, Actor, Critic, symlog
 
 
 def layer_init(layer, std=np.sqrt(2), bias_const=0.0):
@@ -350,6 +350,9 @@ def train():
             0.99,
             0.95,
         )
+
+        ret_ext = symlog(ret_ext)
+        rollout.values_ext = symlog(rollout.values_ext)
 
         advantages = adv_ext * ext_coeff + adv_int * rnd_coeff
         adv_std, adv_mean = torch.std_mean(advantages)

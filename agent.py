@@ -1,5 +1,6 @@
 import os
 import sys
+import random
 from typing import Optional
 
 import numpy as np
@@ -26,11 +27,11 @@ class Agent(BaseAgent):
         self.net = Actor(n_actions).to(device)
         self.net.eval()
         self.state = Backbone.new_state(1).to(device)
-        self.rng = np.random.default_rng(42)
+        self.rng = np.random.default_rng([random.randint(0, 2**32) for _ in range(16)])
 
     def reset(self) -> None:
         self.state = Backbone.new_state(1).to(self.device)
-        self.rng = np.random.default_rng(42)
+        self.rng = np.random.default_rng([random.randint(0, 2**32) for _ in range(16)])
 
     @torch.no_grad()
     def act(self, observation: np.ndarray) -> int:

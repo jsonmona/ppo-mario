@@ -15,39 +15,13 @@ from tensorboardX import SummaryWriter
 
 from video import create_videowriter
 from model import Backbone, Actor, Critic
+from env import make_vector_env
 
 
 def layer_init(layer, std=np.sqrt(2), bias_const=0.0):
     torch.nn.init.orthogonal_(layer.weight, std)
     torch.nn.init.constant_(layer.bias, bias_const)
     return layer
-
-
-def make_vector_env(n_envs: int):
-    from mario_rl.env import make_env
-
-    env = gym.vector.AsyncVectorEnv([lambda: make_env() for _ in range(n_envs)])
-    env = PowerupRewardWrapper(env, coeff=5)
-    return env
-
-
-class PowerupRewardWrapper(gym.vector.VectorWrapper):
-    def __init__(self, env: gym.vector.VectorEnv, coeff: SupportsFloat):
-        super().__init__(env)
-        self.coeff = float(coeff)
-        self.status_to_number = {None: 0, "small": 0, "tall": 1, "fireball": 2}
-        self.prev_powerup = np.zeros(env.num_envs, dtype=np.int8)
-
-    def step(self, actions: np.ndarray) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, dict[str, Any]]:
-        observations, rewards, terminations, truncations, infos = self.env.step(actions)
-
-        curr_powerup = np.asarray([self.status_to_number[x] for x in infos["status"]], dtype=np.int8)
-        extra_reward = np.sign(curr_powerup - self.prev_powerup) * self.coeff
-
-        self.prev_powerup = curr_powerup
-        rewards = rewards + extra_reward
-
-        return observations, rewards, terminations, truncations, infos
 
 
 class RunningMeanStd:
@@ -253,6 +227,19 @@ def train():
 
     env = make_vector_env(n_envs)
 
+    actor = Actor(n_actions).to(device)
+    critic = Critic().to(device)
+    rnd = RNDModel().to(device)
+
+    # Observation warmup
+    print("Observation warmup...")
+    temp_obs, _ = env.reset()
+    for _ in range(100):
+        action = np.random.randint(0, n_actions, size=(n_envs,))
+        temp_obs, _, terminations, truncations, _ = env.step(action)
+        rnd.obs_rms.update(temp_obs)
+    print("Warmup done.")
+
     next_obs, _ = env.reset()
     next_obs = torch.tensor(next_obs).to(device)
     next_done = torch.zeros((n_envs), dtype=torch.bool, device=device)
@@ -265,26 +252,9 @@ def train():
 
     rollout = Rollout.new(n_seq, n_envs).to(device)
 
-    actor = Actor(n_actions).to(device)
-    critic = Critic().to(device)
-    rnd = RNDModel().to(device)
-
     actor_opt = torch.optim.AdamW(actor.parameters(), lr=0.0002, eps=1e-8, weight_decay=1e-4)
     critic_opt = torch.optim.AdamW(critic.parameters(), lr=0.0002, eps=1e-8, weight_decay=1e-4)
     rnd_opt = torch.optim.AdamW(rnd.predictor.parameters(), lr=0.0002, eps=1e-8, weight_decay=1e-4)
-
-    # Observation warmup
-    print("Observation warmup...")
-    warmup_obs = []
-    temp_obs, _ = env.reset()
-    for _ in range(50):
-        action = np.random.randint(0, n_actions, size=(n_envs,))
-        temp_obs, _, terminations, truncations, _ = env.step(action)
-        warmup_obs.append(temp_obs)
-        if np.any(np.logical_or(terminations, truncations)):
-            temp_obs, _ = env.reset()
-    rnd.obs_rms.update(np.concatenate(warmup_obs, axis=0))
-    print("Warmup done.")
 
     reward_rms = RunningMeanStd()
     reward_filter = RewardForwardFilter(0.99)

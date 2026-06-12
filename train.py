@@ -291,7 +291,6 @@ def train():
                 rollout.logprobs[step] = logprob
 
                 next_obs, ext_reward, terminations, truncations, _ = env.step(action.cpu().numpy())
-                ext_reward /= 10
                 next_done = np.logical_or(terminations, truncations)
                 episodic_returns += ext_reward
 

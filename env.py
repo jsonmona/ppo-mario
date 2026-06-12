@@ -55,6 +55,6 @@ def make_vector_env(n_envs: int):
     from mario_rl.env import make_env
 
     env = gym.vector.AsyncVectorEnv([lambda: make_env() for _ in range(n_envs)])
-    env = BlockRewardWrapper(env, episodes=100)
-    env = PowerupRewardWrapper(env, coeff=10)
+    env = BlockRewardWrapper(env, episodes=1000)
+    env = PowerupRewardWrapper(env, coeff=100)
     return env

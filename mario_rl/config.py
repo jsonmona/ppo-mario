@@ -20,7 +20,7 @@ class EvalConfig:
         video_fps: 평가 영상 저장 시 사용할 FPS.
     """
 
-    env_id: str = "SuperMarioBros-1-1-v0"
+    env_id: str = "SuperMarioBros-v0"
     eval_seeds: List[int] = field(default_factory=lambda: [0, 1, 2, 3, 4])
     max_steps_per_episode: int = 4000
     frame_skip: int = 4

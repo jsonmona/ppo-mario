@@ -378,7 +378,7 @@ def train():
                 mb_critic_state, newv_ext, newv_int = critic.forward_multi_step(mb_critic_state, mb_obs, mb_dones)
 
                 v_loss_ext = F.huber_loss(newv_ext, mb_ret_ext)
-                v_loss_int = F.mse_loss(newv_int, mb_ret_int)
+                v_loss_int = F.huber_loss(newv_int, mb_ret_int)
                 v_loss = v_loss_ext + v_loss_int
 
                 critic_opt.zero_grad()
@@ -402,7 +402,7 @@ def train():
 
                 pg_loss = (torch.max(pg_loss1, pg_loss2) * mb_valid_mask).sum() / mb_valid_count
                 distill_loss_ext = F.huber_loss(mb_v_ext, v_ext_from_actor)
-                distill_loss_int = F.mse_loss(mb_v_int, v_int_from_actor)
+                distill_loss_int = F.huber_loss(mb_v_int, v_int_from_actor)
                 distill_loss = distill_loss_ext + distill_loss_int
                 entropy_loss = newentropy.mean()
 

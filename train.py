@@ -65,73 +65,14 @@ class RewardForwardFilter:
         return self.rewems
 
 
-class RNDModel(nn.Module):
-    def __init__(self):
-        super().__init__()
-
-        feature_output = 3136
-
-        # Prediction network
-        self.predictor = nn.Sequential(
-            nn.Conv2d(4, 32, 8, stride=4, padding=0),
-            nn.LeakyReLU(),
-            nn.Conv2d(32, 64, 4, stride=2, padding=0),
-            nn.LeakyReLU(),
-            nn.Conv2d(64, 64, 3, stride=1, padding=0),
-            nn.LeakyReLU(),
-            nn.Flatten(),
-            layer_init(nn.Linear(feature_output, 512)),
-            nn.ReLU(),
-            layer_init(nn.Linear(512, 512)),
-            nn.ReLU(),
-            layer_init(nn.Linear(512, 512)),
-        )
-
-        # Target network
-        self.target = nn.Sequential(
-            nn.Conv2d(4, 32, 8, stride=4, padding=0),
-            nn.LeakyReLU(),
-            nn.Conv2d(32, 64, 4, stride=2, padding=0),
-            nn.LeakyReLU(),
-            nn.Conv2d(64, 64, 3, stride=1, padding=0),
-            nn.LeakyReLU(),
-            nn.Flatten(),
-            layer_init(nn.Linear(feature_output, 512)),
-        )
-
-        # target network is not trainable
-        for param in self.target.parameters():
-            param.requires_grad = False
-
-        self.obs_rms = RunningMeanStd(shape=(1, 84, 84))
-
-    def forward(self, obs: Tensor) -> Tuple[Tensor, Tensor]:
-        target_feature = self.target(obs)
-        predict_feature = self.predictor(obs)
-
-        return predict_feature, target_feature
-
-    def reward(self, obs: Tensor):
-        # observation normalization
-        obs_normalized = (obs.float() - torch.from_numpy(self.obs_rms.mean).to(obs.device)) / torch.sqrt(
-            torch.from_numpy(self.obs_rms.var).to(obs.device) + 1e-8
-        )
-        obs_normalized = torch.clamp(obs_normalized, -5, 5).float()
-
-        pred, target = self.forward(obs_normalized)
-        return torch.square(pred - target.detach()).mean(dim=1)
-
-
 @dataclass
 class Rollout:
     obs: Tensor
     actions: Tensor
     logprobs: Tensor
     rewards_ext: Tensor
-    rewards_int: Tensor
     dones: Tensor
     values_ext: Tensor
-    values_int: Tensor
 
     @classmethod
     def new(cls, n_seq: int, n_envs: int) -> "Rollout":
@@ -143,10 +84,8 @@ class Rollout:
             actions=torch.zeros((s, b), dtype=torch.int32),
             logprobs=torch.zeros((s, b), dtype=torch.float32),
             rewards_ext=torch.zeros((s, b), dtype=torch.float32),
-            rewards_int=torch.zeros((s, b), dtype=torch.float32),
             dones=torch.zeros((s, b), dtype=torch.bool),
             values_ext=torch.zeros((s, b), dtype=torch.float32),
-            values_int=torch.zeros((s, b), dtype=torch.float32),
         )
 
     def to(self, *args, **kwargs):
@@ -155,10 +94,8 @@ class Rollout:
             actions=self.actions.to(*args, **kwargs),
             logprobs=self.logprobs.to(*args, **kwargs),
             rewards_ext=self.rewards_ext.to(*args, **kwargs),
-            rewards_int=self.rewards_int.to(*args, **kwargs),
             dones=self.dones.to(*args, **kwargs),
             values_ext=self.values_ext.to(*args, **kwargs),
-            values_int=self.values_int.to(*args, **kwargs),
         )
 
 
@@ -220,8 +157,6 @@ def train():
     clip_coef = 0.1
     ent_coef = 0.01
     max_grad_norm = 1.0
-    ext_coeff = 1.0
-    rnd_coeff = 2.0
 
     assert n_envs % n_batch_size == 0
 
@@ -229,16 +164,6 @@ def train():
 
     actor = Actor(n_actions).to(device)
     critic = Critic().to(device)
-    rnd = RNDModel().to(device)
-
-    # Observation warmup
-    print("Observation warmup...")
-    temp_obs, _ = env.reset()
-    for _ in range(100):
-        action = np.random.randint(0, n_actions, size=(n_envs,))
-        temp_obs, _, terminations, truncations, _ = env.step(action)
-        rnd.obs_rms.update(temp_obs)
-    print("Warmup done.")
 
     next_obs, _ = env.reset()
     next_obs = torch.tensor(next_obs).to(device)
@@ -254,10 +179,6 @@ def train():
 
     actor_opt = torch.optim.AdamW(actor.parameters(), lr=0.0002, eps=1e-8, weight_decay=1e-4)
     critic_opt = torch.optim.AdamW(critic.parameters(), lr=0.0002, eps=1e-8, weight_decay=1e-4)
-    rnd_opt = torch.optim.AdamW(rnd.predictor.parameters(), lr=0.0002, eps=1e-8, weight_decay=1e-4)
-
-    reward_rms = RunningMeanStd()
-    reward_filter = RewardForwardFilter(0.99)
 
     video = create_videowriter(run_dir, 60 / 4, period=50, disabled=False)
 
@@ -281,12 +202,11 @@ def train():
                 if start_new is not None:
                     torch.save(actor.state_dict(), os.path.splitext(start_new)[0] + ".pth")
 
-                next_actor_state, action_logit, _, _ = actor.forward_single_step(next_actor_state, next_obs, next_done)
-                next_critic_state, cv_ext, cv_int = critic.forward_single_step(next_critic_state, next_obs, next_done)
+                next_actor_state, action_logit, _ = actor.forward_single_step(next_actor_state, next_obs, next_done)
+                next_critic_state, cv_ext = critic.forward_single_step(next_critic_state, next_obs, next_done)
 
                 action, logprob, _ = calc_action(logits=action_logit)
                 rollout.values_ext[step] = cv_ext
-                rollout.values_int[step] = cv_int
                 rollout.actions[step] = action
                 rollout.logprobs[step] = logprob
 
@@ -303,25 +223,10 @@ def train():
                 next_obs = torch.tensor(next_obs).to(device)
                 next_done = torch.tensor(next_done).to(device)
 
-                rnd_reward = rnd.reward(next_obs).cpu().numpy()
-
                 rollout.rewards_ext[step] = torch.tensor(ext_reward).to(device)
-                rollout.rewards_int[step] = torch.tensor(rnd_reward).to(device)
-
-        # Intrinsic reward normalization
-        intrinsic_rewards = rollout.rewards_int.cpu().numpy()
-        intrinsic_returns = np.zeros_like(intrinsic_rewards)
-        for t in range(n_seq):
-            intrinsic_returns[t] = reward_filter.update(intrinsic_rewards[t])
-        reward_rms.update(intrinsic_returns.reshape(-1))
-        rollout.rewards_int /= torch.sqrt(torch.tensor(reward_rms.var, device=device) + 1e-8)
-        rollout.rewards_int.clamp_(max=1.0)
-
-        # Update obs_rms
-        rnd.obs_rms.update(rollout.obs.cpu().numpy().reshape(-1, 4, 84, 84))
 
         with torch.no_grad():
-            _, next_v_ext, next_v_int = critic.forward_single_step(next_critic_state, next_obs, next_done)
+            _, next_v_ext = critic.forward_single_step(next_critic_state, next_obs, next_done)
 
         adv_ext, ret_ext = bootstrap_gae(
             rollout.values_ext,
@@ -333,17 +238,7 @@ def train():
             0.95,
         )
 
-        adv_int, ret_int = bootstrap_gae(
-            rollout.values_int,
-            rollout.rewards_int,
-            torch.zeros_like(rollout.dones),
-            next_v_int,
-            torch.zeros_like(next_done),
-            0.99,
-            0.95,
-        )
-
-        advantages = adv_ext * ext_coeff + adv_int * rnd_coeff
+        advantages = adv_ext
         adv_std, adv_mean = torch.std_mean(advantages)
         advantages = (advantages - adv_mean) / (adv_std + 1e-8)
 
@@ -354,7 +249,6 @@ def train():
             log_pg_loss = 0.0
             log_entropy_loss = 0.0
             log_distill_loss = 0.0
-            log_rnd_loss = 0.0
 
             idx_order = rng.choice(n_envs, size=n_envs, replace=False)
             idx_order = np.reshape(idx_order, (n_envs // n_batch_size, n_batch_size))
@@ -367,19 +261,16 @@ def train():
                 mb_dones = rollout.dones[:, mb_idx]
                 mb_advantages = advantages[:, mb_idx]
                 mb_ret_ext = ret_ext[:, mb_idx]
-                mb_ret_int = ret_int[:, mb_idx]
                 mb_v_ext = rollout.values_ext[:, mb_idx]
-                mb_v_int = rollout.values_int[:, mb_idx]
 
                 mb_actor_state = initial_actor_state[mb_idx]
                 mb_critic_state = initial_critic_state[mb_idx]
 
                 # Optimize critic
-                mb_critic_state, newv_ext, newv_int = critic.forward_multi_step(mb_critic_state, mb_obs, mb_dones)
+                mb_critic_state, newv_ext = critic.forward_multi_step(mb_critic_state, mb_obs, mb_dones)
 
                 v_loss_ext = F.huber_loss(newv_ext, mb_ret_ext)
-                v_loss_int = F.huber_loss(newv_int, mb_ret_int)
-                v_loss = v_loss_ext + v_loss_int
+                v_loss = v_loss_ext
 
                 critic_opt.zero_grad()
                 v_loss.backward()
@@ -387,9 +278,7 @@ def train():
                 critic_opt.step()
 
                 # Optimize policy
-                mb_actor_state, newlogit, v_ext_from_actor, v_int_from_actor = actor.forward_multi_step(
-                    mb_actor_state, mb_obs, mb_dones
-                )
+                mb_actor_state, newlogit, v_ext_from_actor = actor.forward_multi_step(mb_actor_state, mb_obs, mb_dones)
                 _, newlogprob, newentropy = calc_action(newlogit, mb_actions)
                 logratio = newlogprob - mb_logprobs
                 ratio = torch.exp(logratio)
@@ -402,8 +291,7 @@ def train():
 
                 pg_loss = (torch.max(pg_loss1, pg_loss2) * mb_valid_mask).sum() / mb_valid_count
                 distill_loss_ext = F.huber_loss(mb_v_ext, v_ext_from_actor)
-                distill_loss_int = F.huber_loss(mb_v_int, v_int_from_actor)
-                distill_loss = distill_loss_ext + distill_loss_int
+                distill_loss = distill_loss_ext
                 entropy_loss = newentropy.mean()
 
                 actor_loss = pg_loss + distill_loss * 0.5 - entropy_loss * ent_coef
@@ -413,34 +301,11 @@ def train():
                 nn.utils.clip_grad_norm_(actor.parameters(), max_grad_norm)
                 actor_opt.step()
 
-                # Optimize RND
-                if local_epoch == 0:
-                    mb_flatobs = mb_obs.reshape(-1, *mb_obs.shape[2:])
-
-                    # 25%
-                    rnd_train_inds = torch.randperm(mb_flatobs.shape[0], device=device)
-                    rnd_train_inds = rnd_train_inds[: len(rnd_train_inds) // 4]
-                    mb_flatobs_subset = mb_flatobs[rnd_train_inds]
-
-                    obs_normalized = (
-                        mb_flatobs_subset.float() - torch.from_numpy(rnd.obs_rms.mean).to(device)
-                    ) / torch.sqrt(torch.from_numpy(rnd.obs_rms.var).to(device) + 1e-8)
-                    obs_normalized = torch.clamp(obs_normalized, -5, 5).float()
-
-                    pred, target = rnd(obs_normalized)
-                    rnd_loss = torch.square(pred - target.detach()).mean()
-
-                    rnd_opt.zero_grad()
-                    rnd_loss.backward()
-                    nn.utils.clip_grad_norm_(rnd.parameters(), max_grad_norm)
-                    rnd_opt.step()
-
                 # Put back the RNN state and value
                 if local_epoch == n_update_epochs - 1:
                     next_actor_state[mb_idx] = mb_actor_state.detach()
                 next_critic_state[mb_idx] = mb_critic_state.detach()
                 rollout.values_ext[:, mb_idx] = newv_ext.detach()
-                rollout.values_int[:, mb_idx] = newv_int.detach()
 
                 # Logging info
                 with torch.no_grad():
@@ -452,7 +317,6 @@ def train():
                     log_pg_loss += pg_loss.item() / divisor
                     log_entropy_loss += entropy_loss.item() / divisor
                     log_distill_loss += distill_loss.item() / divisor
-                    log_rnd_loss += rnd_loss.item() / divisor
 
             update_step = iteration * n_update_epochs + local_epoch
             writer.add_scalar("loss/approx_kl", log_approx_kl, update_step)
@@ -461,7 +325,6 @@ def train():
             writer.add_scalar("loss/policy_loss", log_pg_loss, update_step)
             writer.add_scalar("loss/entropy_loss", log_entropy_loss, update_step)
             writer.add_scalar("loss/distill_loss", log_distill_loss, update_step)
-            writer.add_scalar("loss/rnd_loss", log_rnd_loss, update_step)
 
             if local_epoch == 0:
                 writer.add_scalar("env/episodic_return", np.mean(episodic_return_history), update_step)

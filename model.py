@@ -78,11 +78,9 @@ class Actor(nn.Module):
         self.backbone = Backbone()
         self.action = nn.Linear(256, n_actions)
         self.value_ext = nn.Linear(256, 1)
-        self.value_int = nn.Linear(256, 1)
 
         torch.nn.init.orthogonal_(self.action.weight, 0.01)
         torch.nn.init.orthogonal_(self.value_ext.weight, 1.0)
-        torch.nn.init.orthogonal_(self.value_int.weight, 1.0)
 
     def forward_multi_step(self, state, obs, dones):
         n_seq = obs.shape[0]
@@ -93,22 +91,19 @@ class Actor(nn.Module):
 
         fold_action = self.action(fold_latent)
         fold_value_ext = self.value_ext(fold_latent)[..., 0]
-        fold_value_int = self.value_int(fold_latent)[..., 0]
 
         action = fold_action.reshape(n_seq, -1, fold_action.shape[-1])
         value_ext = torch.reshape(fold_value_ext, (n_seq, -1))
-        value_int = torch.reshape(fold_value_int, (n_seq, -1))
 
-        return next_state, action, value_ext, value_int
+        return next_state, action, value_ext
 
     def forward_single_step(self, state, obs, done=None):
         next_state, latent = self.backbone.forward_single_step(state, obs, done)
 
         action_logit = self.action(latent)
         value_ext = self.value_ext(latent)[..., 0]
-        value_int = self.value_int(latent)[..., 0]
 
-        return next_state, action_logit, value_ext, value_int
+        return next_state, action_logit, value_ext
 
 
 class Critic(nn.Module):
@@ -117,7 +112,6 @@ class Critic(nn.Module):
 
         self.backbone = Backbone()
         self.value_ext = nn.Linear(256, 1)
-        self.value_int = nn.Linear(256, 1)
 
     def forward_multi_step(self, state, obs, dones):
         n_seq = obs.shape[0]
@@ -127,17 +121,14 @@ class Critic(nn.Module):
         fold_latent = latent.reshape(-1, 256)
 
         fold_value_ext = self.value_ext(fold_latent)[..., 0]
-        fold_value_int = self.value_int(fold_latent)[..., 0]
 
         value_ext = torch.reshape(fold_value_ext, (n_seq, -1))
-        value_int = torch.reshape(fold_value_int, (n_seq, -1))
 
-        return next_state, value_ext, value_int
+        return next_state, value_ext
 
     def forward_single_step(self, state, obs, done=None):
         next_state, latent = self.backbone.forward_single_step(state, obs, done)
 
         value_ext = self.value_ext(latent)[..., 0]
-        value_int = self.value_int(latent)[..., 0]
 
-        return next_state, value_ext, value_int
+        return next_state, value_ext

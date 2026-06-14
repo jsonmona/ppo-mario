@@ -190,8 +190,18 @@ def train():
 
         with torch.no_grad():
             for step in range(n_seq):
+                next_actor_state, action_logit, _ = actor.forward_single_step(next_actor_state, next_obs, next_done)
+                action, logprob, _ = calc_action(logits=action_logit)
+
+                env.step_async(action.cpu().numpy())
+
+                next_critic_state, cv_ext = critic.forward_single_step(next_critic_state, next_obs, next_done)
+
                 rollout.obs[step] = next_obs
                 rollout.dones[step] = next_done
+                rollout.actions[step] = action
+                rollout.logprobs[step] = logprob
+                rollout.values_ext[step] = cv_ext
 
                 start_new = video.step(
                     lambda: next_obs[0, -1].cpu().numpy(),
@@ -202,15 +212,7 @@ def train():
                 if start_new is not None:
                     torch.save(actor.state_dict(), os.path.splitext(start_new)[0] + ".pth")
 
-                next_actor_state, action_logit, _ = actor.forward_single_step(next_actor_state, next_obs, next_done)
-                next_critic_state, cv_ext = critic.forward_single_step(next_critic_state, next_obs, next_done)
-
-                action, logprob, _ = calc_action(logits=action_logit)
-                rollout.values_ext[step] = cv_ext
-                rollout.actions[step] = action
-                rollout.logprobs[step] = logprob
-
-                next_obs, ext_reward, terminations, truncations, _ = env.step(action.cpu().numpy())
+                next_obs, ext_reward, terminations, truncations, _ = env.step_wait()
                 next_done = np.logical_or(terminations, truncations)
                 episodic_returns += ext_reward
 
@@ -220,10 +222,10 @@ def train():
                         episodic_return_history_pos = (episodic_return_history_pos + 1) % len(episodic_return_history)
                     episodic_returns[next_done] = 0
 
-                next_obs = torch.tensor(next_obs).to(device)
-                next_done = torch.tensor(next_done).to(device)
+                next_obs = torch.from_numpy(next_obs).to(device)
+                next_done = torch.from_numpy(next_done).to(device)
 
-                rollout.rewards_ext[step] = torch.tensor(ext_reward).to(device)
+                rollout.rewards_ext[step] = torch.from_numpy(ext_reward).to(device)
 
         with torch.no_grad():
             _, next_v_ext = critic.forward_single_step(next_critic_state, next_obs, next_done)

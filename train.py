@@ -188,6 +188,8 @@ def train():
         initial_actor_state = next_actor_state.clone()
         initial_critic_state = next_critic_state.clone()
 
+        average_reward = 0.0
+
         with torch.no_grad():
             for step in range(n_seq):
                 next_actor_state, action_logit, _ = actor.forward_single_step(next_actor_state, next_obs, next_done)
@@ -215,6 +217,7 @@ def train():
                 next_obs, ext_reward, terminations, truncations, _ = env.step_wait()
                 next_done = np.logical_or(terminations, truncations)
                 ext_reward /= 20
+                average_reward += np.sum(ext_reward) / (ext_reward.size * n_seq)
                 episodic_returns += ext_reward
 
                 if np.any(next_done):
@@ -331,6 +334,7 @@ def train():
 
             if local_epoch == 0:
                 writer.add_scalar("env/episodic_return", np.mean(episodic_return_history), update_step)
+                writer.add_scalar("env/average_value", average_reward, update_step)
                 writer.add_scalar("debug/time_per_iter", time.monotonic() - time_iter_start, update_step)
 
     torch.save(actor.state_dict(), os.path.join(run_dir, "final.pth"))

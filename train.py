@@ -334,7 +334,7 @@ def train():
 
             if local_epoch == 0:
                 writer.add_scalar("env/episodic_return", np.mean(episodic_return_history), update_step)
-                writer.add_scalar("env/average_value", average_reward, update_step)
+                writer.add_scalar("env/average_reward", average_reward, update_step)
                 writer.add_scalar("debug/time_per_iter", time.monotonic() - time_iter_start, update_step)
 
     torch.save(actor.state_dict(), os.path.join(run_dir, "final.pth"))

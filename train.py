@@ -148,10 +148,10 @@ def train():
     run_dir = "./runs/" + datetime.now().strftime("%Y%m%d_%H%M%S")
     writer = SummaryWriter(run_dir, flush_secs=30)
 
-    n_envs = 128
+    n_envs = 512
     n_batch_size = 64
     n_actions = 7
-    n_seq = 128
+    n_seq = 32
     n_iterations = 1_000_000_000 // (n_seq * n_envs)  # 1B env steps
     n_update_epochs = 4
     clip_coef = 0.1

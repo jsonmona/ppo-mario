@@ -192,13 +192,14 @@ wheels = [
 [[package]]
 name = "gym-super-mario-bros"
 version = "7.4.0"
-source = { editable = "gym-super-mario-bros" }
+source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "nes-py" },
 ]
-
-[package.metadata]
-requires-dist = [{ name = "nes-py", specifier = ">=8.1.4" }]
+sdist = { url = "https://files.pythonhosted.org/packages/0d/d0/af1263150596ff8cce3709c9883c1492de67b87b45322875cd6b03b8c967/gym_super_mario_bros-7.4.0.tar.gz", hash = "sha256:9330e6e4f75b4405125abffb35bf1338b9027d2d87e7d4504e2cf05269541ac7", size = 200831, upload-time = "2022-06-21T04:40:07.536Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/0c/4f/0951ba1480c6f874a5e3b043f20d06fc1951cc03844e8bcfa6208291d712/gym_super_mario_bros-7.4.0-py3-none-any.whl", hash = "sha256:5aa094115a32ed3d7f2eb044bc24486888af4f878695c9f26c7383a80c744602", size = 199075, upload-time = "2022-06-21T04:40:04.601Z" },
+]
 
 [[package]]
 name = "gymnasium"
@@ -602,7 +603,7 @@ train = [
 [package.metadata]
 requires-dist = [
     { name = "av", marker = "extra == 'train'", specifier = ">=17.0.1" },
-    { name = "gym-super-mario-bros", editable = "gym-super-mario-bros" },
+    { name = "gym-super-mario-bros", specifier = ">=7.4.0" },
     { name = "gymnasium", specifier = ">=0.29" },
     { name = "imageio", specifier = ">=2.31" },
     { name = "nes-py", specifier = ">=8.2.1" },

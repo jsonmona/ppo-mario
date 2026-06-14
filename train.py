@@ -214,6 +214,7 @@ def train():
 
                 next_obs, ext_reward, terminations, truncations, _ = env.step_wait()
                 next_done = np.logical_or(terminations, truncations)
+                ext_reward /= 20
                 episodic_returns += ext_reward
 
                 if np.any(next_done):

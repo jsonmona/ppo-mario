@@ -148,7 +148,7 @@ def train():
     run_dir = "./runs/" + datetime.now().strftime("%Y%m%d_%H%M%S")
     writer = SummaryWriter(run_dir, flush_secs=30)
 
-    n_envs = 512
+    n_envs = 64
     n_batch_size = 64
     n_actions = 7
     n_seq = 32

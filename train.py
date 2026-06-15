@@ -188,6 +188,31 @@ def train():
 
     video = create_videowriter(run_dir, 60 / 4, period=50, disabled=False)
 
+    # Warm up resume
+    for _ in range(1000):
+        with torch.no_grad():
+            next_actor_state, action_logit, av_ext = actor.forward_single_step(next_actor_state, next_obs, next_done)
+
+            action, logprob, _ = calc_action(logits=action_logit)
+            env.step_async(action.cpu().numpy())
+
+        next_critic_state, cv_ext = critic.forward_single_step(next_critic_state, next_obs, next_done)
+        next_critic_state = next_critic_state.detach()
+
+        assert cv_ext.shape == av_ext.shape
+        critic_loss = F.huber_loss(cv_ext, av_ext)
+
+        critic_opt.zero_grad()
+        critic_loss.backward()
+        nn.utils.clip_grad_norm_(critic.parameters(), max_grad_norm)
+        critic_opt.step()
+
+        next_obs, ext_reward, terminations, truncations, _ = env.step_wait()
+        next_done = np.logical_or(terminations, truncations)
+
+        next_obs = torch.from_numpy(next_obs).to(device)
+        next_done = torch.from_numpy(next_done).to(device)
+
     for iteration in track(range(start_iter, n_iterations + 1), description="Training..."):
         time_iter_start = time.monotonic()
 

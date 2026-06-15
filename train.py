@@ -280,8 +280,8 @@ def train():
 
         # Optimize policy
         for local_epoch in range(n_policy_update_epochs):
-            idx_order = rng.choice(n_envs, size=n_envs, replace=False)
-            idx_order = np.reshape(idx_order, (n_envs // n_policy_batch_envs, n_policy_batch_envs))
+            idx_order = torch.randperm(n_envs, device=device, dtype=torch.int32)
+            idx_order = idx_order.view(n_envs // n_policy_batch_envs, n_policy_batch_envs)
 
             for mb_idx in idx_order:
                 mb_obs = rollout.obs[:, mb_idx]
@@ -327,8 +327,8 @@ def train():
 
         # Optimize critic
         for local_epoch in range(n_value_update_epochs):
-            idx_order = rng.choice(n_envs, size=n_envs, replace=False)
-            idx_order = np.reshape(idx_order, (n_envs // n_value_batch_envs, n_value_batch_envs))
+            idx_order = torch.randperm(n_envs, device=device, dtype=torch.int32)
+            idx_order = idx_order.view(n_envs // n_value_update_epochs, n_value_update_epochs)
 
             for mb_idx in idx_order:
                 mb_obs = rollout.obs[:, mb_idx]
@@ -359,8 +359,8 @@ def train():
 
         # Optimize distillation
         for local_epoch in range(n_distill_update_epochs):
-            idx_order = rng.choice(n_envs, size=n_envs, replace=False)
-            idx_order = np.reshape(idx_order, (n_envs // n_distill_batch_envs, n_distill_batch_envs))
+            idx_order = torch.randperm(n_envs, device=device, dtype=torch.int32)
+            idx_order = idx_order.view(n_envs // n_distill_update_epochs, n_distill_update_epochs)
 
             for mb_idx in idx_order:
                 mb_obs = rollout.obs[:, mb_idx]

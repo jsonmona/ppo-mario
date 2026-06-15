@@ -243,7 +243,7 @@ def train():
             rollout.dones,
             next_v_ext,
             next_done,
-            0.999,
+            0.99,
             0.95,
         )
 

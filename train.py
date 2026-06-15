@@ -24,6 +24,10 @@ def layer_init(layer, std=np.sqrt(2), bias_const=0.0):
     return layer
 
 
+def symlog(x: Tensor):
+    return x.sign() * (x.abs() + 1).log()
+
+
 class RunningMeanStd:
     # https://en.wikipedia.org/wiki/Algorithms_for_calculating_variance#Parallel_algorithm
     def __init__(self, epsilon: float = 1e-4, shape: tuple[int, ...] = ()):
@@ -237,7 +241,7 @@ def train():
         with torch.no_grad():
             _, next_v_ext = critic.forward_single_step(next_critic_state, next_obs, next_done)
 
-        adv_ext, ret_ext = bootstrap_gae(
+        _, ret_ext = bootstrap_gae(
             rollout.values_ext,
             rollout.rewards_ext,
             rollout.dones,
@@ -245,6 +249,16 @@ def train():
             next_done,
             0.99,
             0.95,
+        )
+
+        adv_ext, _ = bootstrap_gae(
+            rollout.values_ext,
+            rollout.rewards_ext,
+            rollout.dones,
+            next_v_ext,
+            next_done,
+            0.99,
+            0.8,
         )
 
         advantages = adv_ext

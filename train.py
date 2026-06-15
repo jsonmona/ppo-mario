@@ -156,11 +156,17 @@ def train():
     n_batch_size = 128
     n_actions = 7
     n_seq = 16
-    n_iterations = 1_000_000_000 // (n_seq * n_envs)  # 1B env steps
-    n_update_epochs = 4
+    n_iterations = 200_000_000 // (n_seq * n_envs)  # 200M env steps
     clip_coef = 0.1
     ent_coef = 0.01
     max_grad_norm = 1.0
+
+    n_policy_update_epochs = 2
+    n_policy_batch_envs = 128
+    n_value_update_epochs = 1
+    n_value_batch_envs = 32
+    n_distill_update_epochs = 2
+    n_distill_batch_envs = 32
 
     assert n_envs % n_batch_size == 0
 
@@ -265,17 +271,17 @@ def train():
         adv_std, adv_mean = torch.std_mean(advantages)
         advantages = (advantages - adv_mean) / (adv_std + 1e-8)
 
-        for local_epoch in range(n_update_epochs):
-            log_approx_kl = 0.0
-            log_clipfracs = 0.0
-            log_v_loss = 0.0
-            log_pg_loss = 0.0
-            log_entropy_loss = 0.0
-            log_distill_loss = 0.0
+        log_approx_kl = 0.0
+        log_clipfracs = 0.0
+        log_v_loss = 0.0
+        log_pg_loss = 0.0
+        log_entropy_loss = 0.0
+        log_distill_loss = 0.0
 
+        # Optimize policy
+        for local_epoch in range(n_policy_update_epochs):
             idx_order = rng.choice(n_envs, size=n_envs, replace=False)
-            idx_order = np.reshape(idx_order, (n_envs // n_batch_size, n_batch_size))
-            idx_order.sort(axis=-1)
+            idx_order = np.reshape(idx_order, (n_envs // n_policy_batch_envs, n_policy_batch_envs))
 
             for mb_idx in idx_order:
                 mb_obs = rollout.obs[:, mb_idx]
@@ -283,25 +289,10 @@ def train():
                 mb_actions = rollout.actions[:, mb_idx]
                 mb_dones = rollout.dones[:, mb_idx]
                 mb_advantages = advantages[:, mb_idx]
-                mb_ret_ext = ret_ext[:, mb_idx]
-                mb_v_ext = rollout.values_ext[:, mb_idx]
 
                 mb_actor_state = initial_actor_state[mb_idx]
-                mb_critic_state = initial_critic_state[mb_idx]
 
-                # Optimize critic
-                mb_critic_state, newv_ext = critic.forward_multi_step(mb_critic_state, mb_obs, mb_dones)
-
-                v_loss_ext = F.huber_loss(newv_ext, mb_ret_ext)
-                v_loss = v_loss_ext
-
-                critic_opt.zero_grad()
-                v_loss.backward()
-                nn.utils.clip_grad_norm_(critic.parameters(), max_grad_norm)
-                critic_opt.step()
-
-                # Optimize policy
-                mb_actor_state, newlogit, v_ext_from_actor = actor.forward_multi_step(mb_actor_state, mb_obs, mb_dones)
+                mb_actor_state, newlogit, _ = actor.forward_multi_step(mb_actor_state, mb_obs, mb_dones)
                 _, newlogprob, newentropy = calc_action(newlogit, mb_actions)
                 logratio = newlogprob - mb_logprobs
                 ratio = torch.exp(logratio)
@@ -313,46 +304,98 @@ def train():
                 mb_valid_count = torch.clamp(mb_valid_mask.sum(), min=1.0)
 
                 pg_loss = (torch.max(pg_loss1, pg_loss2) * mb_valid_mask).sum() / mb_valid_count
-                distill_loss_ext = F.huber_loss(mb_v_ext, v_ext_from_actor)
-                distill_loss = distill_loss_ext
                 entropy_loss = newentropy.mean()
 
-                actor_loss = pg_loss + distill_loss * 0.5 - entropy_loss * ent_coef
+                actor_loss = pg_loss - entropy_loss * ent_coef
 
                 actor_opt.zero_grad()
                 actor_loss.backward()
                 nn.utils.clip_grad_norm_(actor.parameters(), max_grad_norm)
                 actor_opt.step()
 
-                # Put back the RNN state and value
-                if local_epoch == n_update_epochs - 1:
+                # Put back the RNN state
+                if local_epoch == n_policy_update_epochs - 1:
                     next_actor_state[mb_idx] = mb_actor_state.detach()
-                next_critic_state[mb_idx] = mb_critic_state.detach()
-                rollout.values_ext[:, mb_idx] = newv_ext.detach()
 
                 # Logging info
                 with torch.no_grad():
-                    divisor = len(idx_order)
-
+                    divisor = len(idx_order) * n_policy_update_epochs
                     log_approx_kl += ((ratio - 1) - logratio).mean().item() / divisor
                     log_clipfracs += ((ratio - 1.0).abs() > clip_coef).float().mean().item() / divisor
-                    log_v_loss += v_loss.item() / divisor
                     log_pg_loss += pg_loss.item() / divisor
                     log_entropy_loss += entropy_loss.item() / divisor
+
+        # Optimize critic
+        for local_epoch in range(n_value_update_epochs):
+            idx_order = rng.choice(n_envs, size=n_envs, replace=False)
+            idx_order = np.reshape(idx_order, (n_envs // n_value_batch_envs, n_value_batch_envs))
+
+            for mb_idx in idx_order:
+                mb_obs = rollout.obs[:, mb_idx]
+                mb_dones = rollout.dones[:, mb_idx]
+                mb_ret_ext = ret_ext[:, mb_idx]
+
+                mb_critic_state = initial_critic_state[mb_idx]
+
+                mb_critic_state, newv_ext = critic.forward_multi_step(mb_critic_state, mb_obs, mb_dones)
+
+                v_loss_ext = F.huber_loss(newv_ext, mb_ret_ext)
+                v_loss = v_loss_ext
+
+                critic_opt.zero_grad()
+                v_loss.backward()
+                nn.utils.clip_grad_norm_(critic.parameters(), max_grad_norm)
+                critic_opt.step()
+
+                # Put back the RNN state and value
+                if local_epoch == n_value_update_epochs - 1:
+                    next_critic_state[mb_idx] = mb_critic_state.detach()
+                    rollout.values_ext[:, mb_idx] = newv_ext.detach()
+
+                # Logging info
+                with torch.no_grad():
+                    divisor = len(idx_order) * n_value_update_epochs
+                    log_v_loss += v_loss.item() / divisor
+
+        # Optimize distillation
+        for local_epoch in range(n_distill_update_epochs):
+            idx_order = rng.choice(n_envs, size=n_envs, replace=False)
+            idx_order = np.reshape(idx_order, (n_envs // n_distill_batch_envs, n_distill_batch_envs))
+
+            for mb_idx in idx_order:
+                mb_obs = rollout.obs[:, mb_idx]
+                mb_dones = rollout.dones[:, mb_idx]
+                mb_v_ext = rollout.values_ext[:, mb_idx]
+
+                mb_actor_state = initial_actor_state[mb_idx]
+
+                # Optimize policy (distillation component)
+                _, _, v_ext_from_actor = actor.forward_multi_step(mb_actor_state, mb_obs, mb_dones)
+
+                distill_loss_ext = F.huber_loss(mb_v_ext, v_ext_from_actor)
+                distill_loss = distill_loss_ext
+
+                actor_loss = distill_loss * 0.5
+
+                actor_opt.zero_grad()
+                actor_loss.backward()
+                nn.utils.clip_grad_norm_(actor.parameters(), max_grad_norm)
+                actor_opt.step()
+
+                # Logging info
+                with torch.no_grad():
+                    divisor = len(idx_order) * n_distill_update_epochs
                     log_distill_loss += distill_loss.item() / divisor
 
-            update_step = iteration * n_update_epochs + local_epoch
-            writer.add_scalar("loss/approx_kl", log_approx_kl, update_step)
-            writer.add_scalar("loss/clipfrac", log_clipfracs, update_step)
-            writer.add_scalar("loss/value_loss", log_v_loss, update_step)
-            writer.add_scalar("loss/policy_loss", log_pg_loss, update_step)
-            writer.add_scalar("loss/entropy_loss", log_entropy_loss, update_step)
-            writer.add_scalar("loss/distill_loss", log_distill_loss, update_step)
-
-            if local_epoch == 0:
-                writer.add_scalar("env/episodic_return", np.mean(episodic_return_history), update_step)
-                writer.add_scalar("env/average_reward", average_reward, update_step)
-                writer.add_scalar("debug/time_per_iter", time.monotonic() - time_iter_start, update_step)
+        writer.add_scalar("loss/approx_kl", log_approx_kl, iteration)
+        writer.add_scalar("loss/clipfrac", log_clipfracs, iteration)
+        writer.add_scalar("loss/value_loss", log_v_loss, iteration)
+        writer.add_scalar("loss/policy_loss", log_pg_loss, iteration)
+        writer.add_scalar("loss/entropy_loss", log_entropy_loss, iteration)
+        writer.add_scalar("loss/distill_loss", log_distill_loss, iteration)
+        writer.add_scalar("env/episodic_return", np.mean(episodic_return_history), iteration)
+        writer.add_scalar("env/average_reward", average_reward, iteration)
+        writer.add_scalar("debug/time_per_iter", time.monotonic() - time_iter_start, iteration)
 
     torch.save(actor.state_dict(), os.path.join(run_dir, "final.pth"))
     writer.close()

@@ -10,7 +10,7 @@ mario_rl - 2026 강화학습 프로젝트 공통 패키지
 """
 
 from .actions import ACTION_MEANINGS, MARIO_MOVEMENT, describe_actions
-from .config import EvalConfig, DEFAULT_EVAL_CONFIG
+from .config import ALL_STAGE_IDS, DEFAULT_EVAL_CONFIG, DEFAULT_TRAIN_ENV_ID, EvalConfig
 from .interface import BaseAgent, AgentMetadata
 
 __all__ = [
@@ -19,6 +19,8 @@ __all__ = [
     "describe_actions",
     "BaseAgent",
     "AgentMetadata",
+    "ALL_STAGE_IDS",
+    "DEFAULT_TRAIN_ENV_ID",
     "EvalConfig",
     "DEFAULT_EVAL_CONFIG",
 ]

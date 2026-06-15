@@ -3,7 +3,7 @@
 
 핵심 아이디어
 -------------
-강화학습 방법론은 자유임 - PPO, DQN, Decision Transformer, ... 무엇이든 OK
+기본 학생 키트는 PPO 예시를 제공함
 하지만 평가자가 자동으로 점수를 매기려면, 평가 시 호출하는 입력/출력 규격은
 모두 동일해야 하므로, 아래 두 가지만 고정함
 
@@ -41,11 +41,9 @@ class AgentMetadata:
 
     team_id: str  # 예: "team03"
     members: list  # 예: ["홍길동", "김철수"]
-    method: str  # 예: "PPO", "DecisionTransformer", "DQN+ICM"
+    method: str  # 예: "PPO"
     backbone: str = "cnn"  # 예: "cnn", "transformer", "mlp"
-    extra_libraries: Optional[list] = (
-        None  # 사용한 외부 라이브러리(예: ["stable-baselines3"])
-    )
+    extra_libraries: Optional[list] = None  # 사용한 외부 라이브러리
     notes: str = ""  # 자유 메모
 
     def to_dict(self) -> Dict[str, Any]:

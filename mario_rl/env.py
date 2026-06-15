@@ -11,6 +11,7 @@ from gymnasium import spaces
 from .actions import MARIO_MOVEMENT, describe_actions
 from .config import DEFAULT_EVAL_CONFIG, EvalConfig
 
+
 class MaxAndSkipWrapper(gym.Wrapper):
 
     def __init__(self, env, skip: int = 4):
@@ -24,7 +25,6 @@ class MaxAndSkipWrapper(gym.Wrapper):
 
         frames = deque(maxlen=2)
 
-
         obs = None
         for _ in range(self._skip):
             obs, reward, terminated, truncated, info = self.env.step(action)
@@ -35,6 +35,7 @@ class MaxAndSkipWrapper(gym.Wrapper):
         if len(frames) == 2:
             obs = np.maximum(frames[0], frames[1])
         return obs, float(total_reward), terminated, truncated, info
+
 
 class GrayResizeWrapper(gym.ObservationWrapper):
 
@@ -47,18 +48,15 @@ class GrayResizeWrapper(gym.ObservationWrapper):
         )
         self.observation_space = spaces.Box(0, 255, shape=shape, dtype=np.uint8)
 
-
     def observation(self, obs):
         obs = np.asarray(obs)
         if obs.ndim == 2:
             obs = obs[..., None]
         if self.grayscale and obs.shape[-1] == 3:
 
-
             obs = (
                 0.299 * obs[..., 0] + 0.587 * obs[..., 1] + 0.114 * obs[..., 2]
             ).astype(np.uint8)
-
 
         else:
             obs = obs.astype(np.uint8)
@@ -66,6 +64,7 @@ class GrayResizeWrapper(gym.ObservationWrapper):
         out = _resize_nn(obs, self.out_h, self.out_w)
 
         return out.astype(np.uint8)
+
 
 def _resize_nn(img: np.ndarray, out_h: int, out_w: int) -> np.ndarray:
 
@@ -75,14 +74,13 @@ def _resize_nn(img: np.ndarray, out_h: int, out_w: int) -> np.ndarray:
 
         xi = np.linspace(0, w - 1, out_w).astype(np.int64)
 
-
         return img[yi][:, xi]
-
 
     h, w, _ = img.shape
     yi = np.linspace(0, h - 1, out_h).astype(np.int64)
     xi = np.linspace(0, w - 1, out_w).astype(np.int64)
     return img[yi][:, xi, :]
+
 
 class FrameStackWrapper(gym.Wrapper):
 
@@ -99,7 +97,6 @@ class FrameStackWrapper(gym.Wrapper):
         self.observation_space = spaces.Box(
             0, 255, shape=(self.k, h, w), dtype=np.uint8
         )
-
 
     def reset(self, **kwargs):
         obs, info = self.env.reset(**kwargs)
@@ -169,28 +166,21 @@ class _LegacyMarioToGymnasium(gym.Env):
         except Exception:
             return None
 
-
     def close(self):
         try:
             return self.env.close()
         except Exception:
             return None
 
+
 class _IntRAM(np.ndarray):
 
-    def __getitem__(
-        self, idx
-    ):
-        out = super().__getitem__(
-            idx
-        )
-        if isinstance(
-            out, np.generic
-        ):
-            return int(
-                out
-            )
+    def __getitem__(self, idx):
+        out = super().__getitem__(idx)
+        if isinstance(out, np.generic):
+            return int(out)
         return out
+
 
 def _patch_nes_py_numpy2():
 
@@ -205,9 +195,7 @@ def _patch_nes_py_numpy2():
             ("str0", np.str_),
             ("bytes0", np.bytes_),
         ]:
-            if not hasattr(
-                np, _name
-            ):
+            if not hasattr(np, _name):
                 setattr(np, _name, _alias)
 
     except Exception:
@@ -217,36 +205,26 @@ def _patch_nes_py_numpy2():
         import nes_py._rom as _rom_mod
 
         ROM = _rom_mod.ROM
-        if not getattr(
-            ROM, "_numpy2_patched", False
-        ):
+        if not getattr(ROM, "_numpy2_patched", False):
 
-            ROM.prg_rom_size = property(
-                lambda self: 16 * int(self.header[4])
-            )
-            ROM.chr_rom_size = property(
-                lambda self: 8 * int(self.header[5])
-            )
+            ROM.prg_rom_size = property(lambda self: 16 * int(self.header[4]))
+            ROM.chr_rom_size = property(lambda self: 8 * int(self.header[5]))
             ROM._numpy2_patched = True
-
 
         import nes_py.nes_env as _ne
 
         NESEv = _ne.NESEnv
         if not getattr(NESEv, "_numpy2_ram_patched", False):
-            _orig_ram_buffer = (
-                NESEv._ram_buffer
-            )
-
+            _orig_ram_buffer = NESEv._ram_buffer
 
             def _ram_buffer_int(self):
                 return _orig_ram_buffer(self).view(_IntRAM)
-
 
             NESEv._ram_buffer = _ram_buffer_int
             NESEv._numpy2_ram_patched = True
     except Exception:
         pass
+
 
 def _make_super_mario_bros(
     env_id: str,
@@ -269,12 +247,14 @@ def _make_super_mario_bros(
     legacy = JoypadSpace(base, MARIO_MOVEMENT)
     return _LegacyMarioToGymnasium(legacy)
 
-def make_env(config: Optional[EvalConfig] = None, render: bool = False):
 
+def make_env(config: Optional[EvalConfig] = None, render: bool = False):
 
     config = config or DEFAULT_EVAL_CONFIG
 
-    if not config.env_id.startswith("SuperMarioBros-"):
+    # 허용: 개별 스테이지(SuperMarioBros-1-1-v0 ...), 전체(SuperMarioBros-v0),
+    #       랜덤 스테이지(SuperMarioBrosRandomStages-v0) 등 모든 마리오 환경.
+    if not config.env_id.startswith("SuperMarioBros"):
         raise ValueError(
             f"Only real gym-super-mario-bros envs are supported, got {config.env_id!r}."
         )
@@ -285,6 +265,7 @@ def make_env(config: Optional[EvalConfig] = None, render: bool = False):
     env = FrameStackWrapper(env, k=config.frame_stack)
     env = gym.wrappers.TimeLimit(env, max_episode_steps=config.max_steps_per_episode)
     return env
+
 
 def describe_spaces(config: Optional[EvalConfig] = None):
 

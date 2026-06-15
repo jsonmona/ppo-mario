@@ -24,8 +24,12 @@ def layer_init(layer, std=np.sqrt(2), bias_const=0.0):
     return layer
 
 
+def symexp(x: Tensor):
+    return x.sign() * torch.expm1(x.abs())
+
+
 def symlog(x: Tensor):
-    return x.sign() * (x.abs() + 1).log()
+    return x.sign() * torch.log1p(x.abs())
 
 
 class RunningMeanStd:
@@ -229,7 +233,6 @@ def train():
 
                 next_obs, ext_reward, terminations, truncations, _ = env.step_wait()
                 next_done = np.logical_or(terminations, truncations)
-                ext_reward /= 20
                 average_reward += np.sum(ext_reward) / (ext_reward.size * n_seq)
                 episodic_returns += ext_reward
 
@@ -247,29 +250,29 @@ def train():
         with torch.no_grad():
             _, next_v_ext = critic.forward_single_step(next_critic_state, next_obs, next_done)
 
-        _, ret_ext = bootstrap_gae(
-            rollout.values_ext,
-            rollout.rewards_ext,
-            rollout.dones,
-            next_v_ext,
-            next_done,
-            0.99,
-            0.95,
-        )
+            _, ret_ext = bootstrap_gae(
+                symexp(rollout.values_ext),
+                rollout.rewards_ext,
+                rollout.dones,
+                symexp(next_v_ext),
+                next_done,
+                0.99,
+                0.95,
+            )
 
-        adv_ext, _ = bootstrap_gae(
-            rollout.values_ext,
-            rollout.rewards_ext,
-            rollout.dones,
-            next_v_ext,
-            next_done,
-            0.99,
-            0.8,
-        )
+            adv_ext, _ = bootstrap_gae(
+                symexp(rollout.values_ext),
+                rollout.rewards_ext,
+                rollout.dones,
+                symexp(next_v_ext),
+                next_done,
+                0.99,
+                0.8,
+            )
 
-        advantages = adv_ext
-        adv_std, adv_mean = torch.std_mean(advantages)
-        advantages = (advantages - adv_mean) / (adv_std + 1e-8)
+            advantages = adv_ext
+            adv_std, adv_mean = torch.std_mean(advantages)
+            advantages = (advantages - adv_mean) / (adv_std + 1e-8)
 
         log_approx_kl = 0.0
         log_clipfracs = 0.0
@@ -328,7 +331,7 @@ def train():
         # Optimize critic
         for local_epoch in range(n_value_update_epochs):
             idx_order = torch.randperm(n_envs, device=device, dtype=torch.int32)
-            idx_order = idx_order.view(n_envs // n_value_update_epochs, n_value_update_epochs)
+            idx_order = idx_order.view(n_envs // n_value_batch_envs, n_value_batch_envs)
 
             for mb_idx in idx_order:
                 mb_obs = rollout.obs[:, mb_idx]
@@ -339,7 +342,7 @@ def train():
 
                 mb_critic_state, newv_ext = critic.forward_multi_step(mb_critic_state, mb_obs, mb_dones)
 
-                v_loss_ext = F.huber_loss(newv_ext, mb_ret_ext)
+                v_loss_ext = F.mse_loss(newv_ext, symlog(mb_ret_ext))
                 v_loss = v_loss_ext
 
                 critic_opt.zero_grad()
@@ -360,7 +363,7 @@ def train():
         # Optimize distillation
         for local_epoch in range(n_distill_update_epochs):
             idx_order = torch.randperm(n_envs, device=device, dtype=torch.int32)
-            idx_order = idx_order.view(n_envs // n_distill_update_epochs, n_distill_update_epochs)
+            idx_order = idx_order.view(n_envs // n_distill_batch_envs, n_distill_batch_envs)
 
             for mb_idx in idx_order:
                 mb_obs = rollout.obs[:, mb_idx]
@@ -372,7 +375,7 @@ def train():
                 # Optimize policy (distillation component)
                 _, _, v_ext_from_actor = actor.forward_multi_step(mb_actor_state, mb_obs, mb_dones)
 
-                distill_loss_ext = F.huber_loss(mb_v_ext, v_ext_from_actor)
+                distill_loss_ext = F.mse_loss(mb_v_ext, v_ext_from_actor)
                 distill_loss = distill_loss_ext
 
                 actor_loss = distill_loss * 0.5

@@ -148,8 +148,8 @@ def train():
     run_dir = "./runs/" + datetime.now().strftime("%Y%m%d_%H%M%S")
     writer = SummaryWriter(run_dir, flush_secs=30)
 
-    n_envs = 64
-    n_batch_size = 64
+    n_envs = 128
+    n_batch_size = 128
     n_actions = 7
     n_seq = 32
     n_iterations = 1_000_000_000 // (n_seq * n_envs)  # 1B env steps
@@ -164,6 +164,12 @@ def train():
 
     actor = Actor(n_actions).to(device)
     critic = Critic().to(device)
+
+    # Resume
+    actor.load_state_dict(torch.load("runs/20260614_141537/1408010.pth", map_location=device))
+    start_iter = 175520 // n_update_epochs
+
+    writer = SummaryWriter(run_dir, flush_secs=30)
 
     next_obs, _ = env.reset()
     next_obs = torch.tensor(next_obs).to(device)
@@ -182,7 +188,7 @@ def train():
 
     video = create_videowriter(run_dir, 60 / 4, period=50, disabled=False)
 
-    for iteration in track(range(1, n_iterations + 1), description="Training..."):
+    for iteration in track(range(start_iter, n_iterations + 1), description="Training..."):
         time_iter_start = time.monotonic()
 
         initial_actor_state = next_actor_state.clone()

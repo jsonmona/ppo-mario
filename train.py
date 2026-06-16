@@ -197,6 +197,11 @@ def train():
     actor = Actor(n_actions).to(device)
     critic = Critic().to(device)
 
+    # Resume at 50% with lower LR
+    start_iter = 49538
+    actor.load_state_dict(torch.load("runs/20260615_131954/792603-49537-actor.pth"))
+    critic.load_state_dict(torch.load("runs/20260615_131954/792603-49537-critic.pth"))
+
     writer = SummaryWriter(run_dir, flush_secs=30)
 
     next_obs, _ = env.reset()
@@ -211,15 +216,15 @@ def train():
 
     rollout = Rollout.new(n_seq, n_envs).to(device)
 
-    actor_opt = torch.optim.AdamW(actor.parameters(), lr=0.0002, eps=1e-8, weight_decay=1e-4)
-    critic_opt = torch.optim.AdamW(critic.parameters(), lr=0.0002, eps=1e-8, weight_decay=1e-4)
+    actor_opt = torch.optim.AdamW(actor.parameters(), lr=0.0001, eps=1e-8, weight_decay=1e-4)
+    critic_opt = torch.optim.AdamW(critic.parameters(), lr=0.0001, eps=1e-8, weight_decay=1e-4)
 
     actor_lr = LinearWarmup(actor_opt, 100, 1e-7)
     critic_lr = LinearWarmup(critic_opt, 100, 1e-7)
 
     video = create_videowriter(run_dir, 60 / 4, period=50, disabled=False)
 
-    for iteration in track(range(1, n_iterations + 1), description="Training..."):
+    for iteration in track(range(start_iter, n_iterations + 1), description="Training..."):
         time_iter_start = time.monotonic()
 
         initial_actor_state = next_actor_state.clone()

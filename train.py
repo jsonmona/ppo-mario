@@ -32,6 +32,24 @@ def symlog(x: Tensor):
     return x.sign() * torch.log1p(x.abs())
 
 
+class LinearWarmup(torch.optim.lr_scheduler.LRScheduler):
+    def __init__(
+        self, optimizer: torch.optim.Optimizer, warmup_steps: int, start_lr: SupportsFloat, last_epoch: int = -1
+    ):
+        self.warmup_steps = warmup_steps
+        self.start_lr = float(start_lr)
+        super().__init__(optimizer, last_epoch)
+
+    def get_lr(self):
+        if self.last_epoch > self.warmup_steps:
+            return self.base_lrs
+
+        return [
+            self.start_lr + (base_lr - self.start_lr) * (self.last_epoch / self.warmup_steps)
+            for base_lr in self.base_lrs
+        ]
+
+
 class RunningMeanStd:
     # https://en.wikipedia.org/wiki/Algorithms_for_calculating_variance#Parallel_algorithm
     def __init__(self, epsilon: float = 1e-4, shape: tuple[int, ...] = ()):
@@ -195,6 +213,9 @@ def train():
 
     actor_opt = torch.optim.AdamW(actor.parameters(), lr=0.0002, eps=1e-8, weight_decay=1e-4)
     critic_opt = torch.optim.AdamW(critic.parameters(), lr=0.0002, eps=1e-8, weight_decay=1e-4)
+
+    actor_lr = LinearWarmup(actor_opt, 100, 1e-7)
+    critic_lr = LinearWarmup(critic_opt, 100, 1e-7)
 
     video = create_videowriter(run_dir, 60 / 4, period=50, disabled=False)
 
@@ -389,6 +410,10 @@ def train():
                 with torch.no_grad():
                     divisor = len(idx_order) * n_distill_update_epochs
                     log_distill_loss += distill_loss.item() / divisor
+
+        # Step LR scheduler
+        actor_lr.step()
+        critic_lr.step()
 
         writer.add_scalar("loss/approx_kl", log_approx_kl, iteration)
         writer.add_scalar("loss/clipfrac", log_clipfracs, iteration)

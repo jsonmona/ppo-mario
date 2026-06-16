@@ -227,6 +227,10 @@ def train():
     for iteration in track(range(start_iter, n_iterations + 1), description="Training..."):
         time_iter_start = time.monotonic()
 
+        # Step LR scheduler
+        actor_lr.step()
+        critic_lr.step()
+
         initial_actor_state = next_actor_state.clone()
         initial_critic_state = next_critic_state.clone()
 
@@ -415,10 +419,6 @@ def train():
                 with torch.no_grad():
                     divisor = len(idx_order) * n_distill_update_epochs
                     log_distill_loss += distill_loss.item() / divisor
-
-        # Step LR scheduler
-        actor_lr.step()
-        critic_lr.step()
 
         writer.add_scalar("loss/approx_kl", log_approx_kl, iteration)
         writer.add_scalar("loss/clipfrac", log_clipfracs, iteration)

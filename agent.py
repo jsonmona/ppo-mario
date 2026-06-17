@@ -16,7 +16,7 @@ from model import Backbone, Actor
 class Agent(BaseAgent):
     """Submission entry point."""
 
-    TEAM_ID = "teamXX"
+    TEAM_ID = "team03"
     MEMBERS = ["name1", "name2"]
     METHOD = "PPO"
     BACKBONE = "cnn+gru"
@@ -24,14 +24,15 @@ class Agent(BaseAgent):
     def __init__(self, observation_space, action_space, device: str = "cpu"):
         super().__init__(observation_space, action_space, device)
         n_actions = int(action_space.n)
+        self.temperature = 0.2
         self.net = Actor(n_actions).to(device)
         self.net.eval()
         self.state = Backbone.new_state(1).to(device)
-        self.rng = np.random.default_rng([random.randint(0, 2**32) for _ in range(16)])
+        self.rng = np.random.Generator(np.random.PCG64(42))
 
     def reset(self) -> None:
         self.state = Backbone.new_state(1).to(self.device)
-        self.rng = np.random.default_rng([random.randint(0, 2**32) for _ in range(16)])
+        self.rng = np.random.Generator(np.random.PCG64(42))
 
     @torch.no_grad()
     def act(self, observation: np.ndarray) -> int:
@@ -39,8 +40,9 @@ class Agent(BaseAgent):
         if obs.ndim == 3:
             obs = obs.unsqueeze(0)
 
-        self.state, action_logit, _, _ = self.net.forward_single_step(self.state, obs)
+        self.state, action_logit, _ = self.net.forward_single_step(self.state, obs)
 
+        action_logit /= self.temperature
         probs = torch.softmax(action_logit, dim=1)[0].cpu().numpy()
 
         probs = probs.astype(np.float64)

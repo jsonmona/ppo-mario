@@ -169,16 +169,15 @@ def train():
     torch.manual_seed(42)
 
     device = torch.device("cuda") if torch.cuda.is_available() else torch.device("cpu")
-    rng = np.random.Generator(np.random.PCG64(12345678))
 
     run_dir = "./runs/" + datetime.now().strftime("%Y%m%d_%H%M%S")
     writer = SummaryWriter(run_dir, flush_secs=30)
 
     n_envs = 128
     n_batch_size = 128
-    n_actions = 7
+    n_actions = 12
     n_seq = 16
-    n_iterations = 200_000_000 // (n_seq * n_envs)  # 200M env steps
+    n_iterations = 300_000_000 // (n_seq * n_envs)  # 300M env steps
     clip_coef = 0.1
     ent_coef = 0.01
     max_grad_norm = 1.0
@@ -194,13 +193,26 @@ def train():
 
     env = make_vector_env(n_envs)
 
+    assert env.single_action_space.n == n_actions  # type: ignore
+
     actor = Actor(n_actions).to(device)
     critic = Critic().to(device)
 
-    # Resume at 50% with lower LR
-    start_iter = 49538
-    actor.load_state_dict(torch.load("runs/20260615_131954/792603-49537-actor.pth"))
-    critic.load_state_dict(torch.load("runs/20260615_131954/792603-49537-critic.pth"))
+    # Resume with more actions
+    start_iter = 96939
+    old_actor = Actor(7)
+    old_actor.load_state_dict(torch.load("runs/20260616_111052/1551025-96939-actor.pth"))
+    actor.backbone.load_state_dict(old_actor.backbone.state_dict())
+    actor.value_ext.load_state_dict(old_actor.value_ext.state_dict())
+    with torch.no_grad():
+        actor.action.weight[:7].copy_(old_actor.action.weight)
+        actor.action.bias[:7].copy_(old_actor.action.bias)
+        actor.action.bias[7:] -= 1
+    critic.load_state_dict(torch.load("runs/20260616_111052/1551025-96939-critic.pth"))
+
+    del old_actor
+    actor.requires_grad_(True)
+    critic.requires_grad_(True)
 
     writer = SummaryWriter(run_dir, flush_secs=30)
 
@@ -430,7 +442,8 @@ def train():
         writer.add_scalar("env/average_reward", average_reward, iteration)
         writer.add_scalar("debug/time_per_iter", time.monotonic() - time_iter_start, iteration)
 
-    torch.save(actor.state_dict(), os.path.join(run_dir, "final.pth"))
+    torch.save(actor.state_dict(), os.path.join(run_dir, "final-actor.pth"))
+    torch.save(critic.state_dict(), os.path.join(run_dir, "final-critic.pth"))
     writer.close()
 
 

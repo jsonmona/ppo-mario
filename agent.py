@@ -17,7 +17,7 @@ class Agent(BaseAgent):
     """Submission entry point."""
 
     TEAM_ID = "team03"
-    MEMBERS = ["name1", "name2"]
+    MEMBERS = ["백여민", "심준", "윤여민", "정민용"]
     METHOD = "PPO"
     BACKBONE = "cnn+gru"
 

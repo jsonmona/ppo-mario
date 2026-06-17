@@ -14,7 +14,7 @@ from mario_rl.env import (
 )
 from agent import Agent
 
-MODEL_PATH = "runs/20260616_111052/final.pth"
+MODEL_PATH = "runs/20260617_100819/1572081-98255-actor.pth"
 
 
 class VideoRecordingWrapper(gym.Wrapper):

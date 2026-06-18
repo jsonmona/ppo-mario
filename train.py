@@ -176,7 +176,7 @@ def train():
     n_envs = 256
     n_actions = 12
     n_seq = 16
-    n_iterations = 500_000_000 // (n_seq * n_envs)  # 500M env steps
+    n_iterations = 1_000_000_000 // (n_seq * n_envs)  # 1B env steps
     clip_coef = 0.1
     ent_coef = 0.02
     max_grad_norm = 1.0

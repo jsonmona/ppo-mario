@@ -173,14 +173,14 @@ def train():
     run_dir = "./runs/" + datetime.now().strftime("%Y%m%d_%H%M%S")
     writer = SummaryWriter(run_dir, flush_secs=30)
 
-    n_envs = 128
-    n_batch_size = 128
+    n_envs = 256
     n_actions = 12
     n_seq = 16
-    n_iterations = 300_000_000 // (n_seq * n_envs)  # 300M env steps
+    n_iterations = 500_000_000 // (n_seq * n_envs)  # 500M env steps
     clip_coef = 0.1
-    ent_coef = 0.01
+    ent_coef = 0.02
     max_grad_norm = 1.0
+    lr = 0.00005
 
     n_policy_update_epochs = 2
     n_policy_batch_envs = 128
@@ -188,8 +188,6 @@ def train():
     n_value_batch_envs = 32
     n_distill_update_epochs = 2
     n_distill_batch_envs = 32
-
-    assert n_envs % n_batch_size == 0
 
     env = make_vector_env(n_envs)
 
@@ -199,18 +197,10 @@ def train():
     critic = Critic().to(device)
 
     # Resume with more actions
-    start_iter = 96939
-    old_actor = Actor(7)
-    old_actor.load_state_dict(torch.load("runs/20260616_111052/1551025-96939-actor.pth"))
-    actor.backbone.load_state_dict(old_actor.backbone.state_dict())
-    actor.value_ext.load_state_dict(old_actor.value_ext.state_dict())
-    with torch.no_grad():
-        actor.action.weight[:7].copy_(old_actor.action.weight)
-        actor.action.bias[:7].copy_(old_actor.action.bias)
-        actor.action.bias[7:] -= 1
-    critic.load_state_dict(torch.load("runs/20260616_111052/1551025-96939-critic.pth"))
+    start_iter = 119519
+    actor.load_state_dict(torch.load("runs/20260617_100819/1912306-119519-actor.pth"))
+    critic.load_state_dict(torch.load("runs/20260617_100819/1912306-119519-critic.pth"))
 
-    del old_actor
     actor.requires_grad_(True)
     critic.requires_grad_(True)
 
@@ -228,8 +218,8 @@ def train():
 
     rollout = Rollout.new(n_seq, n_envs).to(device)
 
-    actor_opt = torch.optim.AdamW(actor.parameters(), lr=0.0001, eps=1e-8, weight_decay=1e-4)
-    critic_opt = torch.optim.AdamW(critic.parameters(), lr=0.0001, eps=1e-8, weight_decay=1e-4)
+    actor_opt = torch.optim.AdamW(actor.parameters(), lr=lr, eps=1e-8, weight_decay=1e-6)
+    critic_opt = torch.optim.AdamW(critic.parameters(), lr=lr, eps=1e-8, weight_decay=1e-6)
 
     actor_lr = LinearWarmup(actor_opt, 100, 1e-7)
     critic_lr = LinearWarmup(critic_opt, 100, 1e-7)
